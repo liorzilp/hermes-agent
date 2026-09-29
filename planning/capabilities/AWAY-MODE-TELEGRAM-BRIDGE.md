@@ -4,8 +4,11 @@
 design passed independent review round 5 (PASS, no Critical/High/Medium
 findings); Low findings folded. **V1 BUILT 2026-09-29** (commit `c020efb9f2`):
 broker + CLI + Telegram interceptor + sweep triggers + away-mode skill +
-50 tests green. Deployment into the runtime install and `enabled=true`
-config flip remain (owner step).
+50 tests green. **DEPLOYED into the runtime install 2026-09-29** — cherry-picked
+as `b6ed1be0ab` (on upstream `b4410b4bad`; runtime now diverged from upstream
+main, cherry-pick-only for future updates) and `away_bridge.enabled=true` with
+`telegram.owner_chat_id/owner_user_id` set in `~/.hermes/config.yaml`.
+**Remaining: gateway restart (owner go) + §9 live acceptance test.**
 **Owner:** Lior (Telegram account/chat `1682802389`)
 **Capability:** A per-session, explicitly armed bridge that relays a session's
 input requests to the owner's Telegram and accepts exactly the first answer
