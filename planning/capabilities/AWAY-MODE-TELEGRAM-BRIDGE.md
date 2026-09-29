@@ -2,7 +2,10 @@
 
 **Status:** Rev 7 (converged) — requirements owner-confirmed 2026-09-28;
 design passed independent review round 5 (PASS, no Critical/High/Medium
-findings); Low findings folded. Awaiting owner build approval.
+findings); Low findings folded. **V1 BUILT 2026-09-29** (commit `c020efb9f2`):
+broker + CLI + Telegram interceptor + sweep triggers + away-mode skill +
+50 tests green. Deployment into the runtime install and `enabled=true`
+config flip remain (owner step).
 **Owner:** Lior (Telegram account/chat `1682802389`)
 **Capability:** A per-session, explicitly armed bridge that relays a session's
 input requests to the owner's Telegram and accepts exactly the first answer
