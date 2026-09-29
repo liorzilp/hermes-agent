@@ -5941,6 +5941,31 @@ class BasePlatformAdapter(ABC):
 
         coerce_plaintext_gateway_command(event)
 
+        # Away-mode Telegram bridge pre-dispatch interceptor (§4.4). Sits
+        # after adapter-level owner authorization + text batching and before
+        # the active-session guard / _pending_messages merge, so a claimed
+        # answer is never queued into a busy DM session. Owner-origin
+        # bridge-shaped batches are always handled (claim/NACK/suppress).
+        if getattr(event, "source", None) is not None and str(
+            getattr(event.source, "platform", "")
+        ) == "telegram":
+            from gateway.platforms.away_bridge_interceptor import intercept_message
+
+            async def _send_bridge_reply(_text: str) -> None:
+                await self._send_with_retry(
+                    chat_id=event.source.chat_id,
+                    content=_text,
+                    reply_to=_reply_anchor_for_event(event),
+                )
+
+            try:
+                _bridge = await intercept_message(event, _send_bridge_reply)
+            except Exception:
+                logger.exception("[%s] away-bridge interceptor crashed; dispatching normally", self.name)
+                _bridge = None
+            if _bridge is not None and _bridge.handled:
+                return
+
         # Telegram topic recovery only applies to private DM topic lanes. Do
         # not submit a no-op check for group/forum/channel traffic to the
         # shared default executor: a busy pool would delay message dispatch.
