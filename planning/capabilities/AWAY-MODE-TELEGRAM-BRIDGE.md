@@ -20,8 +20,9 @@ Runtime HEAD `8de43984f4`; fork mirror `53db129684`.
 unit-covered) and the upstream path: file `message:pre_dispatch` issue
 (draft `.hermes/plans/2026-09-29_113850-upstream-issue-message-pre-dispatch.md`)
 → if engaged, hook PR + plugin re-home; else cherry-pick protocol stays.
-No fork push: `liorzilp/hermes-agent` does not exist (upstream 403 for
-`liorzilp`); fork mirrors stay local until an owner-directed remote exists.
+Fork `github.com/liorzilp/hermes-agent` created 2026-09-29 via API; mirror
+remote `fork`; local main pushed as branch **`away-bridge-v1`**
+(`62c969a0ba`, tip verified on remote; fork's `main` stays the upstream tip).
 **Owner:** Lior (Telegram account/chat `1682802389`)
 **Capability:** A per-session, explicitly armed bridge that relays a session's
 input requests to the owner's Telegram and accepts exactly the first answer
