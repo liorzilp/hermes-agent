@@ -8,7 +8,20 @@ broker + CLI + Telegram interceptor + sweep triggers + away-mode skill +
 as `b6ed1be0ab` (on upstream `b4410b4bad`; runtime now diverged from upstream
 main, cherry-pick-only for future updates) and `away_bridge.enabled=true` with
 `telegram.owner_chat_id/owner_user_id` set in `~/.hermes/config.yaml`.
-**Remaining: gateway restart (owner go) + §9 live acceptance test.**
+**§9 LIVE ACCEPTANCE PASSED 2026-09-29** — gates 1 (Telegram claim,
+TELEGRAM_WON), 2 (chat-first race, CHAT_WON), 3 (single small dup-ack),
+4 (two-session isolation), 5 (claimed pre-dispatch; DM agent never saw
+tokens), 10 (idempotent once-only delivery) verified end-to-end against the
+live gateway, driven through the owner's Telegram Web. Four live-found bugs
+fixed and re-tested: Platform-enum compare (`.value`), re-arm-after-disarm,
+owner gate DM carve-out (`user_id=None` on live DM events), CLI ack-on-reject.
+Runtime HEAD `8de43984f4`; fork mirror `53db129684`.
+**Remaining:** gate 7 (Telegram-conflict sweep — needs natural 409;
+unit-covered) and the upstream path: file `message:pre_dispatch` issue
+(draft `.hermes/plans/2026-09-29_113850-upstream-issue-message-pre-dispatch.md`)
+→ if engaged, hook PR + plugin re-home; else cherry-pick protocol stays.
+No fork push: `liorzilp/hermes-agent` does not exist (upstream 403 for
+`liorzilp`); fork mirrors stay local until an owner-directed remote exists.
 **Owner:** Lior (Telegram account/chat `1682802389`)
 **Capability:** A per-session, explicitly armed bridge that relays a session's
 input requests to the owner's Telegram and accepts exactly the first answer
