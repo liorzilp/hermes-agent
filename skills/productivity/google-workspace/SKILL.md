@@ -12,6 +12,7 @@ required_credential_files:
     description: Google OAuth2 client credentials (downloaded from Google Cloud Console)
 metadata:
   hermes:
+    local_divergence: local-newer (fleet runtime fork; re-diff before update-clobber)
     tags: [Google, Gmail, Calendar, Drive, Sheets, Docs, Contacts, Email, OAuth]
     homepage: https://github.com/NousResearch/hermes-agent
     related_skills: [himalaya]
@@ -282,16 +283,14 @@ $GAPI sheets append SHEET_ID "Sheet1!A:C" --values '[["new","row","data"]]'
 
 ```bash
 # Read (a tabbed Doc returns a "tabs" array; single-tab and legacy Docs also return "body")
-$GAPI docs get DOC_ID
-$GAPI docs get DOC_ID --tab TAB_ID     # read one tab of a tabbed Doc
+$GAPI docs get DOC_ID                  # reads the whole Doc (all tabs flattened into one body)
 
 # Create a new Doc (optionally seeded with body text)
 $GAPI docs create --title "Meeting Notes"
 $GAPI docs create --title "Draft" --body "First paragraph..."
 
 # Append text to the end of an existing Doc
-$GAPI docs append DOC_ID --text "Additional content to append"
-$GAPI docs append DOC_ID --tab TAB_ID --text "..."   # --tab required when the Doc has multiple tabs
+$GAPI docs append DOC_ID --text "Additional content to append"   # appends to the end of the Doc body
 ```
 
 ## Output Format
