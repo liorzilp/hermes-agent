@@ -232,7 +232,8 @@ class CLIAgentSetupMixin:
     def _ensure_runtime_credentials(self) -> bool:
         """Re-resolve provider credentials before agent use so key rotation / token
         refresh are picked up without restarting the CLI. False on auth failure."""
-        from cli import ChatConsole, logger
+        from cli import ChatConsole, logger, CLI_CONFIG
+        from hermes_cli.fallback_config import pinned_model_disables_fallback
         from hermes_cli.runtime_provider import (
             deferred_token_mint, format_runtime_provider_error, resolve_runtime_provider)
         _primary_exc = None
@@ -254,7 +255,13 @@ class CLIAgentSetupMixin:
             except Exception as exc:
                 _primary_exc = exc
             if _primary_exc is not None:
-                runtime = self._resolve_fallback_runtime(_primary_exc)
+                # A pinned route (-m/--provider) never walks the chain at startup either: the auth
+                # failure belongs to the chosen provider, and rerouting it onto an unpinned fallback
+                # is exactly what the pin ruled out (fallback.pinned_model_policy=disable, default).
+                runtime = (
+                    None if getattr(self, "_explicit_model_override", False)
+                    and pinned_model_disables_fallback(CLI_CONFIG)
+                    else self._resolve_fallback_runtime(_primary_exc))
                 if runtime is not None:
                     _primary_exc = None
         if runtime is None:

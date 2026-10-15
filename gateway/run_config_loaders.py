@@ -554,7 +554,7 @@ class GatewayConfigLoadersMixin:
         return self._fallback_model
 
     @staticmethod
-    def _apply_fallback_chain_to_agent(agent: Any, chain: list | None) -> None:
+    def _apply_fallback_chain_to_agent(agent: Any, chain: list | None, *, explicit_pin: bool | None = None) -> None:
         """Keep a cached agent's fallback chain aligned with current config.
 
         Skips the rewrite while a cooldown holds the agent on an activated fallback provider
@@ -563,10 +563,15 @@ class GatewayConfigLoadersMixin:
 
         When primary is active (or cooldown expired), replace the chain so mid-uptime ``fallback_providers``
         edits take effect without requiring a gateway restart (#60955).
+
+        ``explicit_pin`` (session /model switch, --once override) clears the chain: with the
+        default ``fallback.pinned_model_policy=disable`` a pinned session runs with no chain —
+        same rule a pinned cron job follows. Pure mechanism; the caller decides whether its
+        session is pinned and what the policy says (``pinned_model_disables_fallback``).
         """
         if agent is None:
             return
-        new_chain = list(chain or [])
+        new_chain = [] if explicit_pin else list(chain or [])
         rate_limited_until = getattr(agent, "_rate_limited_until", 0) or 0
         if getattr(agent, "_fallback_activated", False) and rate_limited_until > time.monotonic():
             return

@@ -174,7 +174,9 @@ class GatewaySessionAgentMixin:
             session_db=getattr(runner._session_db, "_db", runner._session_db),
             # Reload from disk — do not reuse the startup snapshot.
             # See #60955.
-            fallback_model=None if api_runtime_locked() else self._runner._refresh_fallback_model(),
+            fallback_model=(
+                [] if (not api_runtime_locked() and self._session_route_pinned(ctx.session_key, ctx.user_config))
+                else None if api_runtime_locked() else self._runner._refresh_fallback_model()),
             skip_context_files=skip_context_files,
             # Keep the persona even with minimal context: soul identity is one small file.
             load_soul_identity=not bool(policy and policy.ignore_rules),
@@ -184,6 +186,22 @@ class GatewaySessionAgentMixin:
             # None leaves the agent reading the owner's config, as before.
             run_budget_seconds=policy.run_budget_seconds if policy else None,
         )
+
+    def _session_route_pinned(self, session_key: str | None, user_config: dict | None = None) -> bool:
+        """Whether this gateway session's model route is explicitly pinned AND the policy disables
+        fallback for pins (``fallback.pinned_model_policy``, default ``disable``).
+
+        A pin is a live session ``/model`` override or an armed ``--once`` restore. ``user_config``
+        (the gateway config snapshot) avoids a second config read when the caller already holds it.
+        """
+        from hermes_cli.fallback_config import pinned_model_disables_fallback
+        if not pinned_model_disables_fallback(user_config if isinstance(user_config, dict) else None):
+            return False
+        if not session_key:
+            return False
+        state = self._runner._peek_session_state(session_key)
+        override = state.conversation.model_override if state else None
+        return bool(override) or bool(state is not None and state.conversation.one_turn_restore)
 
     def _resolve_turn_agent(self, turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr):
         """Reuse this session's cached AIAgent (frozen system prompt + tool schemas → prompt cache
@@ -214,7 +232,9 @@ class GatewaySessionAgentMixin:
             with cache_lock:
                 cache.pop(ctx.session_key, None)
         if found.reused and agent is not None:
-            self._runner._apply_fallback_chain_to_agent(agent, None if locked else runner._refresh_fallback_model())
+            self._runner._apply_fallback_chain_to_agent(
+                agent, None if locked else runner._refresh_fallback_model(),
+                explicit_pin=self._session_route_pinned(ctx.session_key, ctx.user_config))
         if found.evicted is not None:
             self._release_evicted_agent(found.evicted)
         if agent is None:

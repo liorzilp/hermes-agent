@@ -34,17 +34,24 @@ class CLIChatTurnMixin:
     def _sync_fallback_chain_with_config(self, agent) -> None:
         """Adopt ``fallback_providers`` edits made while this chat is open (#95066) — the same
         per-turn, fail-closed contract as the Desktop/TUI and messaging gateways: a torn config.yaml
-        keeps the last known-good chain instead of reading as "chain removed"."""
+        keeps the last known-good chain instead of reading as "chain removed". A session that
+        explicitly switched its model (``/model``, ``-m``) runs with no chain while
+        ``fallback.pinned_model_policy`` is ``disable`` (default): the operator chose that route."""
         from cli import logger
         try:
             from gateway.run import GatewayRunner
             from hermes_cli.config_effective import load_user_config_effective
-            from hermes_cli.fallback_config import get_fallback_chain
-            self._fallback_model = get_fallback_chain(load_user_config_effective(fail_closed=True))
+            from hermes_cli.fallback_config import get_fallback_chain, pinned_model_disables_fallback
+            effective_cfg = load_user_config_effective(fail_closed=True)
+            if getattr(self, "_explicit_model_override", False) and pinned_model_disables_fallback(effective_cfg):
+                chain: Optional[list] = []
+            else:
+                chain = get_fallback_chain(effective_cfg)
         except Exception as e:
             logger.debug("fallback chain sync skipped (keeping current chain): %s", e)
             return
-        GatewayRunner._apply_fallback_chain_to_agent(agent, self._fallback_model)
+        self._fallback_model = chain  # a rebuilt agent starts from the fresh chain too
+        GatewayRunner._apply_fallback_chain_to_agent(agent, chain)
 
     def chat(self, message, images: list | None = None, voice_input: bool = False) -> Optional[str]:
         """Run one user turn; returns the agent's response, or None on error.
@@ -351,6 +358,10 @@ class CLIChatTurnMixin:
         finally:
             if _one_turn_model_restore:
                 self._restore_model_runtime_snapshot(_one_turn_model_restore)
+                # The --once pin rode the turn; the restore returns the session to its standing
+                # route's pin state (a standing -m pin stays pinned), whose chain the next turn's
+                # _sync_fallback_chain_with_config re-derives.
+                self._explicit_model_override = bool(_one_turn_model_restore.get("explicit_model_override"))
             # Credit notices paint cleanly above the prompt here, not behind streamed output.
             self._flush_credit_notices()
             # A reused thread must never hold stale references to a disposed CLI instance.
