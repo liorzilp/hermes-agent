@@ -8,6 +8,7 @@ dependencies: []
 platforms: [linux, macos, windows]
 metadata:
   hermes:
+    local_divergence: upstream-newer (fleet runtime fork; re-diff before update-clobber)
     tags: [ASCII, Art, Banners, Creative, Unicode, Text-Art, pyfiglet, figlet, cowsay, boxes]
     related_skills: [excalidraw]
 

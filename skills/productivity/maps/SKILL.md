@@ -7,6 +7,7 @@ license: MIT
 platforms: [linux, macos, windows]
 metadata:
   hermes:
+    local_divergence: local-newer (fleet runtime fork; re-diff before update-clobber)
     tags: [maps, geocoding, places, routing, distance, directions, nearby, location, openstreetmap, nominatim, overpass, osrm]
     category: productivity
     requires_toolsets: [terminal]

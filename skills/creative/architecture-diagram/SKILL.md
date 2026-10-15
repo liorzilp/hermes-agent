@@ -8,6 +8,7 @@ dependencies: []
 platforms: [linux, macos, windows]
 metadata:
   hermes:
+    local_divergence: local-newer (fleet runtime fork; re-diff before update-clobber)
     tags: [architecture, diagrams, SVG, HTML, visualization, infrastructure, cloud]
     related_skills: [concept-diagrams, excalidraw]
 ---

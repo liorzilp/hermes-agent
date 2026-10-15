@@ -8,6 +8,7 @@ dependencies: [lm-eval, transformers, vllm]
 platforms: [linux, macos]
 metadata:
   hermes:
+    local_divergence: upstream-newer (fleet runtime fork; re-diff before update-clobber)
     tags: [Evaluation, LM Evaluation Harness, Benchmarking, MMLU, HumanEval, GSM8K, EleutherAI, Model Quality, Academic Benchmarks, Industry Standard]
 
 ---

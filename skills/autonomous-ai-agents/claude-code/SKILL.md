@@ -7,6 +7,7 @@ license: MIT
 platforms: [linux, macos, windows]
 metadata:
   hermes:
+    local_divergence: upstream-newer (fleet runtime fork; re-diff before update-clobber)
     tags: [Coding-Agent, Claude, Anthropic, Code-Review, Refactoring, PTY, Automation]
     related_skills: [codex, hermes-agent, opencode]
 ---
