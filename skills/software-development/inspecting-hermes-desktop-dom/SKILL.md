@@ -7,6 +7,7 @@ license: MIT
 platforms: [linux, macos, windows]
 metadata:
   hermes:
+    local_divergence: local-newer (fleet runtime fork; re-diff before update-clobber)
     tags: [desktop, electron, cdp, dom, ui-verification, self-inspection]
     related_skills: [node-inspect-debugger, systematic-debugging, dogfood]
 ---

@@ -7,6 +7,7 @@ license: MIT
 platforms: [linux, macos, windows]
 metadata:
   hermes:
+    local_divergence: upstream-newer (fleet runtime fork; re-diff before update-clobber)
     tags: [RSS, Blogs, Feed-Reader, Monitoring]
     homepage: https://github.com/JulienTant/blogwatcher-cli
 prerequisites:
