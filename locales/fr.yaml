@@ -83,6 +83,7 @@ gateway:
       {message}
 
       _Alternative texte : répondez `{prefix}approve` pour changer de modèle ou `{prefix}cancel` pour conserver le modèle actuel._
+    skew_restart_hint:       "Erreur : {error} (Cela se résout au prochain redémarrage de la passerelle ; après redémarrage, /model fonctionnera à nouveau.)"
   agents:
     header: "🤖 **Agents et tâches actifs**"
     active_agents: "**Agents actifs :** {count}"

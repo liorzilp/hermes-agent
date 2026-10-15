@@ -78,6 +78,7 @@ gateway:
     guard_confirm: "⚠️ **{title}**\n\n{message}\n\n_文字回退方式：回复 `{prefix}approve` 切换，或回复 `{prefix}cancel` 保留当前模型。_"
     err_once_local: "`--once` is not available in this session; use `/model <name>` and switch back after the turn."
     local_next_turn: "Applies from your next message."
+    skew_restart_hint:       "错误：{error}（此问题在网关下次重启后清除；重启后 /model 将恢复可用。）"
   agents:
     header: "🤖 **活跃代理与任务**"
     active_agents: "**活跃代理：** {count}"

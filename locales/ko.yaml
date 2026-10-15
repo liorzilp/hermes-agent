@@ -78,6 +78,7 @@ gateway:
     guard_confirm: "⚠️ **{title}**\n\n{message}\n\n_텍스트로 답하려면: 전환은 `{prefix}approve`, 현재 모델 유지는 `{prefix}cancel`이라고 답해 주세요._"
     err_once_local: "`--once` is not available in this session; use `/model <name>` and switch back after the turn."
     local_next_turn: "Applies from your next message."
+    skew_restart_hint:       "오류: {error} (이 문제는 게이트웨이가 다시 시작될 때 해결됩니다. 다시 시작한 후에는 /model을 다시 사용할 수 있습니다.)"
   agents:
     header: "🤖 **활성 에이전트 및 작업**"
     active_agents: "**활성 에이전트:** {count}"

@@ -219,16 +219,21 @@ def test_construct_inputs_follow_the_session_mode(tmp_path, monkeypatch):
                              _refresh_fallback_model=lambda: profile_reads.append('fallback') or chain,
                              _get_system_prompt_for_channel=lambda *a: profile_reads.append('prompt') or 'SYS')
     authority = SimpleNamespace(runner=runner, profile_id=str(tmp_path))
-    launch = {'cwd': str(tmp_path), 'model': 'm', 'provider': 'custom', 'base_url': 'http://127.0.0.1:9/v1'}
+    launch = {'cwd': str(tmp_path)}
+    explicit = {'cwd': str(tmp_path), 'model': 'm', 'provider': 'custom', 'base_url': 'http://127.0.0.1:9/v1'}
     ordinary = build_policy(launch, {})
-    config_only = _bypass_policy({**launch, 'ignore_user_config': True}, private_secrets={})
-    safe = _bypass_policy({**launch, 'safe_mode': True}, private_secrets={})
+    pinned = build_policy(explicit, {})
+    config_only = _bypass_policy({**explicit, 'ignore_user_config': True}, private_secrets={})
+    safe = _bypass_policy({**explicit, 'safe_mode': True}, private_secrets={})
     assert construct_inputs(authority, ordinary, 'c') == {
         'fallback_model': chain, 'ephemeral_system_prompt': 'SYS', 'prefill_messages': None}
     assert profile_reads == ['fallback', 'prompt']
     empty = {'fallback_model': None, 'ephemeral_system_prompt': None, 'prefill_messages': None}
     assert construct_inputs(authority, config_only, 'c') == empty
     assert construct_inputs(authority, safe, 'c') == empty and profile_reads == ['fallback', 'prompt']
+    # An explicitly pinned route (model/provider/base_url in the launch receipt) resolves
+    # fail-fast: no fallback walk, even with the profile carrying one (the pin feature).
+    assert construct_inputs(authority, pinned, 'c')['fallback_model'] is None
     frame = {'policy': {'request_json': json.dumps({'construct_v1': construct_inputs(authority, ordinary, 'c')})}}
     assert construct_kwargs(frame)['fallback_model'] == chain
     assert construct_kwargs({'policy': {'request_json': '{}'}}) == {}

@@ -65,3 +65,27 @@ class TestEffectiveRuntimeProvider:
 
     def test_none_inputs_are_safe(self):
         assert effective_runtime_provider(None, None) == ""
+
+
+class TestPinnedModelDisablesFallback:
+    """An explicitly pinned model (-m, /model, session override) suppresses the chain by default."""
+
+    def test_default_and_explicit_disable(self):
+        from hermes_cli.fallback_config import pinned_model_disables_fallback
+        assert pinned_model_disables_fallback(None) is True
+        assert pinned_model_disables_fallback({}) is True
+        assert pinned_model_disables_fallback({"fallback": {}}) is True
+        assert pinned_model_disables_fallback(
+            {"fallback": {"pinned_model_policy": "disable"}}) is True
+
+    def test_inherit_policy_keeps_the_chain_on_pins(self):
+        from hermes_cli.fallback_config import pinned_model_disables_fallback
+        assert pinned_model_disables_fallback(
+            {"fallback": {"pinned_model_policy": "inherit"}}) is False
+        assert pinned_model_disables_fallback(
+            {"fallback": {"pinned_model_policy": " INHERIT "}}) is False
+
+    def test_unknown_values_fail_closed_to_disable(self):
+        from hermes_cli.fallback_config import pinned_model_disables_fallback
+        assert pinned_model_disables_fallback(
+            {"fallback": {"pinned_model_policy": "whatever"}}) is True

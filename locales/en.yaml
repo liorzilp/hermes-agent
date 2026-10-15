@@ -59,6 +59,9 @@ gateway:
     max_output_label: "Max output: {tokens} tokens"
     cost_label: "Cost: {cost}"
     capabilities_label: "Capabilities: {capabilities}"
+    # Stale-checkout /model guard: extra clarity for chat surfaces (upstream err_skew already
+    # names the restart; this adds the after-restart note without touching the localized copy).
+    skew_restart_hint:       "Error: {error} (This clears at the next gateway restart; after restarting, /model will work again.)"
     prompt_caching_enabled: "Prompt caching: enabled"
     warning_prefix: "Warning: {warning}"
     saved_global: "Saved to config.yaml (`--global`)"

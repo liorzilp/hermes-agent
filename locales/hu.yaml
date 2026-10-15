@@ -78,6 +78,7 @@ gateway:
     guard_confirm: "⚠️ **{title}**\n\n{message}\n\n_Szöveges mód: írd be: `{prefix}approve` a váltáshoz, `{prefix}cancel` a jelenlegi modell megtartásához._"
     err_once_local: "`--once` is not available in this session; use `/model <name>` and switch back after the turn."
     local_next_turn: "Applies from your next message."
+    skew_restart_hint:       "Hiba: {error} (Ez a gateway következő újraindításakor tisztul; újraindítás után a /model újra működni fog.)"
   agents:
     header: "🤖 **Aktív ügynökök és feladatok**"
     active_agents: "**Aktív ügynökök:** {count}"
