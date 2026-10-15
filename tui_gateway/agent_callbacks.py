@@ -424,8 +424,8 @@ def _make_agent_fallback_chain(model_override, provider_override, cfg) -> list:
         from hermes_cli.fallback_config import pinned_model_disables_fallback
         if pinned_model_disables_fallback(cfg):
             return []
-    except Exception:
-        return []
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return []  # malformed/unknown cfg shape: fail safe to the configured chain
     return _load_fallback_model()
 
 

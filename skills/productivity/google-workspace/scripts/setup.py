@@ -29,6 +29,7 @@ import os
 import shutil
 import subprocess
 import sys
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _distribution_version
 from pathlib import Path
 
@@ -120,8 +121,8 @@ def _missing_required_packages() -> list[str]:
         try:
             if _distribution_version(name) != wanted:
                 missing.append(spec)
-        except Exception:
-            missing.append(spec)
+        except PackageNotFoundError:
+            missing.append(spec)  # not installed -> missing by definition
     return missing
 
 
@@ -138,7 +139,7 @@ def install_deps():
     try:
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", "--quiet"] + missing,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, timeout=600,
         )
         remaining = _missing_required_packages()
         if remaining:
@@ -146,7 +147,7 @@ def install_deps():
             return False
         print("Dependencies installed.")
         return True
-    except subprocess.CalledProcessError as e:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         pip_error = e
 
     # Fallback: the interpreter has no pip (the Hermes Docker image's venv is
@@ -160,7 +161,7 @@ def install_deps():
             subprocess.check_call(
                 [uv, "pip", "install", "--python", sys.executable, "--quiet"]
                 + missing,
-                stdout=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, timeout=600,
             )
             remaining = _missing_required_packages()
             if remaining:
@@ -168,7 +169,7 @@ def install_deps():
                 return False
             print("Dependencies installed.")
             return True
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             print(f"ERROR: Failed to install dependencies via uv: {e}")
             print(f"Manually: {uv} pip install --python {sys.executable} {' '.join(REQUIRED_PACKAGES)}")
             return False

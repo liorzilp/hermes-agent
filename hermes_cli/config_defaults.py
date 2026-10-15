@@ -34,13 +34,10 @@ DEFAULT_CONFIG = {
     "model": "",
     "providers": {},
     "fallback_providers": [],
-    # min_switch_reset_seconds: opt-in (0 = off). When a rate-limited primary declares a reset
-    # sooner than this many seconds, stay on it (the retry backoff rides out the window) instead
-    # of switching the turn to a fallback model.
-    # pinned_model_policy: "disable" (default) = a session/turn that explicitly pinned its model
-    # (-m/--provider, /model, session override) runs with NO fallback chain; "inherit" = the pin
-    # keeps walking the configured chain (the pre-1.x behavior).
-    "fallback": {"min_switch_reset_seconds": 0, "pinned_model_policy": "disable"},
+    # min_switch_reset_seconds: opt-in (0 = off). A rate-limited primary declaring a reset sooner
+    # than this stays on (backoff rides out the window) instead of switching to a fallback model.
+    "fallback": {  # pinned_model_policy: "disable"(default)=pins chain-less; "inherit"=walk.
+        "min_switch_reset_seconds": 0, "pinned_model_policy": "disable"},
     "credential_pool_strategies": {},
     "toolsets": ["hermes-cli"],
     # journal_mode: SQLite journal mode for every Hermes DB. "wal" default; use "delete" on

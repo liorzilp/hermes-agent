@@ -4594,9 +4594,8 @@ def test_make_agent_passes_configured_fallback_chain(monkeypatch):
         captured.update(kwargs)
         return types.SimpleNamespace(model=kwargs.get("model"))
 
-    monkeypatch.delenv("HERMES_MODEL", raising=False)
-    monkeypatch.delenv("HERMES_INFERENCE_MODEL", raising=False)
-    monkeypatch.delenv("HERMES_TUI_PROVIDER", raising=False)
+    for var in ("HERMES_MODEL", "HERMES_INFERENCE_MODEL", "HERMES_TUI_PROVIDER"):
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.delenv("HERMES_DESKTOP", raising=False)
     monkeypatch.delenv("HERMES_DESKTOP_TERMINAL", raising=False)
     monkeypatch.setattr(
@@ -20724,19 +20723,14 @@ class TestResolveRuntimeWithFallback:
         assert resolution.used_fallback is True
 
     def test_make_agent_uses_fallback_on_auth_error(self, monkeypatch):
-        """Integration: _make_agent falls back to configured fallback
-        provider when the DEFAULT route's primary raises AuthError. A session-pinned
-        model_override never walks the chain (fallback.pinned_model_policy=disable)."""
+        """DEFAULT route (no override) walks the chain on AuthError; a session-pinned
+        model_override never does (fallback.pinned_model_policy=disable)."""
         import types
-
         from hermes_cli.auth import AuthError
 
         captured = {}
-        fallback_runtime = {
-            "provider": "deepseek",
-            "api_key": "fb-tok",
-            "base_url": "https://fallback.invalid/v1",
-        }
+        fallback_runtime = {"provider": "deepseek", "api_key": "fb-tok",
+                            "base_url": "https://fallback.invalid/v1"}
 
         def fake_resolve(**kwargs):
             if kwargs.get("requested") in (None, "openai-codex"):
@@ -20747,23 +20741,12 @@ class TestResolveRuntimeWithFallback:
             captured.update(kwargs)
             return types.SimpleNamespace(model=kwargs.get("model"))
 
-        monkeypatch.delenv("HERMES_MODEL", raising=False)
-        monkeypatch.delenv("HERMES_INFERENCE_MODEL", raising=False)
-        monkeypatch.delenv("HERMES_TUI_PROVIDER", raising=False)
-        monkeypatch.setattr(
-            server,
-            "_load_cfg",
-            lambda: {
-                "model": {"default": "gpt-5.5", "provider": "openai-codex"},
-                "fallback_providers": [
-                    {"provider": "deepseek", "model": "deepseek-v4-pro"},
-                ],
-            },
-        )
-        monkeypatch.setattr(
-            "hermes_cli.runtime_provider.resolve_runtime_provider",
-            fake_resolve,
-        )
+        for var in ("HERMES_MODEL", "HERMES_INFERENCE_MODEL", "HERMES_TUI_PROVIDER"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr(server, "_load_cfg", lambda: {
+            "model": {"default": "gpt-5.5", "provider": "openai-codex"},
+            "fallback_providers": [{"provider": "deepseek", "model": "deepseek-v4-pro"}]})
+        monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve)
         monkeypatch.setattr("run_agent.AIAgent", fake_agent)
         monkeypatch.setattr(server, "_load_enabled_toolsets", lambda *_a, **_kw: ["file"])
         monkeypatch.setattr(server, "_get_db", lambda: None)
@@ -20777,46 +20760,27 @@ class TestResolveRuntimeWithFallback:
 
     def test_make_agent_pinned_override_fails_fast_on_auth_error(self, monkeypatch):
         """A session model_override is a pin: its AuthError is the answer, never rerouted
-        onto the configured chain (fallback.pinned_model_policy=disable, default)."""
+        onto the chain (fallback.pinned_model_policy=disable, default)."""
         import types
-
         from hermes_cli.auth import AuthError
 
         def fake_resolve(**kwargs):
             raise AuthError("No Codex credentials stored")
 
-        monkeypatch.delenv("HERMES_MODEL", raising=False)
-        monkeypatch.delenv("HERMES_INFERENCE_MODEL", raising=False)
-        monkeypatch.delenv("HERMES_TUI_PROVIDER", raising=False)
-        monkeypatch.setattr(
-            server,
-            "_load_cfg",
-            lambda: {
-                "model": {"default": "gpt-5.5", "provider": "openai-codex"},
-                "fallback_providers": [
-                    {"provider": "deepseek", "model": "deepseek-v4-pro"},
-                ],
-            },
-        )
-        monkeypatch.setattr(
-            "hermes_cli.runtime_provider.resolve_runtime_provider",
-            fake_resolve,
-        )
+        for var in ("HERMES_MODEL", "HERMES_INFERENCE_MODEL", "HERMES_TUI_PROVIDER"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr(server, "_load_cfg", lambda: {
+            "model": {"default": "gpt-5.5", "provider": "openai-codex"},
+            "fallback_providers": [{"provider": "deepseek", "model": "deepseek-v4-pro"}]})
+        monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve)
         monkeypatch.setattr("run_agent.AIAgent", lambda **kwargs: types.SimpleNamespace(model=kwargs.get("model")))
         monkeypatch.setattr(server, "_load_enabled_toolsets", lambda *_a, **_kw: ["file"])
         monkeypatch.setattr(server, "_get_db", lambda: None)
 
         with pytest.raises(AuthError):
-            server._make_agent(
-                "sid",
-                "session-key",
-                model_override={
-                    "model": "gpt-5.5",
-                    "provider": "openai-codex",
-                    "base_url": "https://chatgpt.com/backend-api/codex",
-                    "api_key": "stale-codex-token",
-                },
-            )
+            server._make_agent("sid", "session-key", model_override={
+                "model": "gpt-5.5", "provider": "openai-codex",
+                "base_url": "https://chatgpt.com/backend-api/codex", "api_key": "stale-codex-token"})
 
 
 def test_get_usage_does_not_substitute_cumulative_total_for_context_used():
