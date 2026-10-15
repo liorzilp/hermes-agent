@@ -575,7 +575,7 @@ def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str
     if route_pinned:
         try:
             from hermes_cli.fallback_config import pinned_model_disables_fallback
-        except Exception:
+        except ImportError:
             pinned_model_disables_fallback = None
         if pinned_model_disables_fallback is None or pinned_model_disables_fallback(_load_cfg()):
             # Fail fast on the chosen route: an AuthError here is the pin's own answer, never a
@@ -699,7 +699,7 @@ def _make_agent(
         skip_context_files=ignore_rules, skip_memory=ignore_rules,
         # An explicit model pin (composer pick, /model switch, resumed explicit runtime) drops the
         # chain under the default fallback.pinned_model_policy=disable — the operator chose this route.
-        fallback_model=_agent_callbacks._make_agent_fallback_chain(model_override, provider_override, cfg),
+        fallback_model=_make_agent_fallback_chain(model_override, provider_override, cfg),
         # The resolved provider's request body (a custom entry's extra_body), as the CLI/cron/gateway pass it.
         request_overrides=runtime.get("request_overrides"),
         prefill_messages=_load_prefill_messages() or None, **_agent_cbs(sid))
