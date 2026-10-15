@@ -10,7 +10,7 @@ import os
 import queue
 import threading
 from datetime import datetime
-from hermes_cli.fallback_config import get_fallback_chain
+from hermes_cli.fallback_config import get_fallback_chain, pinned_model_disables_fallback
 from hermes_state_ids import new_session_id
 from pathlib import Path
 from rich.console import Console
@@ -291,7 +291,16 @@ class CLIInitMixin:
             except (TypeError, ValueError):
                 pass
 
-        self._fallback_model = get_fallback_chain(CLI_CONFIG)
+        # An explicit -m/--provider pins the route; with fallback.pinned_model_policy=disable
+        # (default) a pinned session runs with NO fallback chain — the operator chose that
+        # provider and usually a different model, exactly what the pin ruled out. Same rule a
+        # pinned cron job / delegated child follows (scoped_fallback_chain). The pin flag was
+        # stamped by _init_model_and_provider above.
+        self._fallback_model = (
+            get_fallback_chain(CLI_CONFIG)
+            if not (getattr(self, "_explicit_model_override", False)
+                    and pinned_model_disables_fallback(CLI_CONFIG))
+            else [])
 
     def _init_runtime_state(self, resume):
         """Session store + all per-run mutable state (queues, overlays, pet/voice/status-bar fields)."""

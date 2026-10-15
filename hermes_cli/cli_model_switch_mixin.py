@@ -241,6 +241,10 @@ def _commit_model_switch(
     from cli import HermesCLI, _cprint
     old_model = cli.model
     snapshot = cli._snapshot_model_runtime() if one_turn else None
+    # A deliberate /model switch pins the session's route: with the default
+    # fallback.pinned_model_policy=disable it also drops the fallback chain (an explicit
+    # --global writes config.yaml and stops being a pin — the default route owns it).
+    cli._explicit_model_override = not (persist_global and not one_turn)
     if not cli._stage_and_swap_model(result, old_model):
         return
     if not picker:
@@ -574,6 +578,8 @@ class CLIModelSwitchMixin:
         return {
             **_runtime_fields(self),
             "reasoning_config": copy.deepcopy(getattr(self, "reasoning_config", None)),
+            # Route-pinning rides the restore: a standing -m pin must survive a /model --once detour.
+            "explicit_model_override": bool(getattr(self, "_explicit_model_override", False)),
             "agent_primary_runtime": copy.deepcopy(
                 getattr(agent, "_primary_runtime", None)
             ) if agent is not None else None}

@@ -2465,6 +2465,28 @@ def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str
             requested_provider = provider_override
         resolve_kwargs = {"requested": requested_provider, "target_model": model or None}
         overrides = {}
+    # An explicitly pinned route (session /model override or a resumed row's explicit runtime)
+    # never walks the chain at resolution time under the default fallback.pinned_model_policy:
+    # the auth failure belongs to the chosen provider, and rerouting it onto an unpinned
+    # fallback is exactly what the pin ruled out. The default route keeps the chain walk.
+    route_pinned = (
+        (isinstance(model_override, dict) and bool(model_override.get("model")))
+        or (isinstance(model_override, str) and bool(model_override.strip()))
+        or bool(provider_override))
+    if route_pinned:
+        try:
+            from hermes_cli.fallback_config import pinned_model_disables_fallback
+        except Exception:
+            pinned_model_disables_fallback = None
+        if pinned_model_disables_fallback is None or pinned_model_disables_fallback(_load_cfg()):
+            # Fail fast on the chosen route: an AuthError here is the pin's own answer, never a
+            # license to walk the chain (errors propagate to the turn's provider-error surface).
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+            runtime = resolve_runtime_provider(**resolve_kwargs)
+            runtime.update({k: v for k, v in overrides.items() if v})
+            if any(overrides.values()):
+                _rederive_per_model_route(model, runtime)
+            return model, runtime
     resolution = _resolve_runtime_with_fallback(resolve_kwargs)
     if resolution.used_fallback:
         if not resolution.selected_model:
@@ -2596,7 +2618,10 @@ def _make_agent(
         session_db=session_db if session_db is not None else _get_db(), ephemeral_system_prompt=system_prompt or None,
         checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
-        skip_context_files=ignore_rules, skip_memory=ignore_rules, fallback_model=_load_fallback_model(),
+        skip_context_files=ignore_rules, skip_memory=ignore_rules,
+        # An explicit model pin (composer pick, /model switch, resumed explicit runtime) drops the
+        # chain under the default fallback.pinned_model_policy=disable — the operator chose this route.
+        fallback_model=_make_agent_fallback_chain(model_override, provider_override, cfg),
         prefill_messages=_load_prefill_messages() or None, **_agent_cbs(sid))
     if context_cwd_is_launch_artifact is None:
         context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(session)

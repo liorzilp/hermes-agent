@@ -49,6 +49,7 @@ fallback:
 | Key | Default | Effect |
 |-----|---------|--------|
 | `fallback.min_switch_reset_seconds` | `0` (off) | A rate-limited primary whose declared reset is sooner than this many seconds is not swapped for a fallback; the retry backoff waits out the window instead. |
+| `fallback.pinned_model_policy` | `disable` | A session/turn that explicitly pinned its model (`-m`/`--provider`, `/model`, `/model --once`, session model override) runs with **no** fallback chain — the operator chose that route. `inherit` restores the old behavior (pinned sessions also walk the chain). |
 
 Gemini fallback entries accept `gemini`, `google`, `google-gemini`, and
 `google-ai-studio`. On Google's native API endpoint, all use the native Gemini

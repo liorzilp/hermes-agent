@@ -120,6 +120,19 @@ def get_fallback_chain(config: dict[str, Any] | None) -> list[dict[str, Any]]:
     return chain
 
 
+def pinned_model_disables_fallback(config: dict[str, Any] | None) -> bool:
+    """Whether an explicitly pinned model (``-m``/``--provider``, ``/model``, session model
+    override) suppresses the inherited fallback chain for that session/turn.
+
+    ``fallback.pinned_model_policy``: ``"disable"`` (default) — the operator chose that route,
+    a chain entry is a different provider and usually a different model, so predictability beats
+    liveness; ``"inherit"`` — keep the old behavior (pinned sessions also walk the chain).
+    Same rule a pinned cron job / delegated child already follows (``scoped_fallback_chain``).
+    """
+    policy = ((config or {}).get("fallback") or {}).get("pinned_model_policy") or "disable"
+    return str(policy).strip().lower() != "inherit"
+
+
 def scoped_fallback_chain(
     inherited: list[dict[str, Any]] | None, declared: Any, *, pinned: bool, owner: str,
 ) -> list[dict[str, Any]] | None:

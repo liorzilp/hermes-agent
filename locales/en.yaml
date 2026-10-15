@@ -44,6 +44,11 @@ gateway:
   # ("Provider:", "Context:", etc.) and the help/footer lines are localized.
   model:
     error_prefix:           "Error: {error}"
+    # Stale-checkout /model guard: the guard's own remediation is a restart, so
+    # tell the owner that plainly instead of leaving the raw error as a dead end
+    # (2026-10-13: the identical error fired 3x in 6 minutes). A gateway restart
+    # clears the skew; repeat attempts show this same hint.
+    skew_restart_hint:      "Error: {error} (This clears at the next gateway restart; after restarting, /model will work again.)"
     switched:               "Model switched to `{model}`"
     provider_label:         "Provider: {provider}"
     context_label:          "Context: {tokens} tokens"

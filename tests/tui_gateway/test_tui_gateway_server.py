@@ -20309,7 +20309,8 @@ class TestResolveRuntimeWithFallback:
 
     def test_make_agent_uses_fallback_on_auth_error(self, monkeypatch):
         """Integration: _make_agent falls back to configured fallback
-        provider when the primary provider raises AuthError."""
+        provider when the DEFAULT route's primary raises AuthError. A session-pinned
+        model_override never walks the chain (fallback.pinned_model_policy=disable)."""
         import types
 
         from hermes_cli.auth import AuthError
@@ -20351,21 +20352,55 @@ class TestResolveRuntimeWithFallback:
         monkeypatch.setattr(server, "_load_enabled_toolsets", lambda *_a, **_kw: ["file"])
         monkeypatch.setattr(server, "_get_db", lambda: None)
 
-        agent = server._make_agent(
-            "sid",
-            "session-key",
-            model_override={
-                "model": "gpt-5.5",
-                "provider": "openai-codex",
-                "base_url": "https://chatgpt.com/backend-api/codex",
-                "api_key": "stale-codex-token",
-            },
-        )
-
+        # No override: the config-default route walks the chain on AuthError.
+        agent = server._make_agent("sid", "session-key")
         assert agent.model == "deepseek-v4-pro"
         assert captured["provider"] == "deepseek"
         assert captured["base_url"] == "https://fallback.invalid/v1"
         assert captured["api_key"] == "fb-tok"
+
+    def test_make_agent_pinned_override_fails_fast_on_auth_error(self, monkeypatch):
+        """A session model_override is a pin: its AuthError is the answer, never rerouted
+        onto the configured chain (fallback.pinned_model_policy=disable, default)."""
+        import types
+
+        from hermes_cli.auth import AuthError
+
+        def fake_resolve(**kwargs):
+            raise AuthError("No Codex credentials stored")
+
+        monkeypatch.delenv("HERMES_MODEL", raising=False)
+        monkeypatch.delenv("HERMES_INFERENCE_MODEL", raising=False)
+        monkeypatch.delenv("HERMES_TUI_PROVIDER", raising=False)
+        monkeypatch.setattr(
+            server,
+            "_load_cfg",
+            lambda: {
+                "model": {"default": "gpt-5.5", "provider": "openai-codex"},
+                "fallback_providers": [
+                    {"provider": "deepseek", "model": "deepseek-v4-pro"},
+                ],
+            },
+        )
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            fake_resolve,
+        )
+        monkeypatch.setattr("run_agent.AIAgent", lambda **kwargs: types.SimpleNamespace(model=kwargs.get("model")))
+        monkeypatch.setattr(server, "_load_enabled_toolsets", lambda *_a, **_kw: ["file"])
+        monkeypatch.setattr(server, "_get_db", lambda: None)
+
+        with pytest.raises(AuthError):
+            server._make_agent(
+                "sid",
+                "session-key",
+                model_override={
+                    "model": "gpt-5.5",
+                    "provider": "openai-codex",
+                    "base_url": "https://chatgpt.com/backend-api/codex",
+                    "api_key": "stale-codex-token",
+                },
+            )
 
 
 def test_get_usage_does_not_substitute_cumulative_total_for_context_used():

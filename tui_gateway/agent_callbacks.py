@@ -363,6 +363,10 @@ def _sync_agent_fallback_with_config(sid: str, session: dict) -> None:
     gateway applies to its cached agents (``GatewayRunner._refresh_fallback_model``): the config is
     read fail-closed, so a torn/invalid config.yaml keeps the agent's last known-good chain instead of
     ``_load_cfg()``'s fail-open ``{}`` reading as "chain removed" and wiping it. Never blocks the turn.
+
+    A session whose route is explicitly pinned (``session.model_override``, composer pick, armed
+    ``--once`` restore) drops the chain while ``fallback.pinned_model_policy`` is ``disable``
+    (default) — the operator chose that route.
     """
     agent = session.get("agent")
     if agent is None:
@@ -370,12 +374,46 @@ def _sync_agent_fallback_with_config(sid: str, session: dict) -> None:
     try:
         from gateway.run import GatewayRunner
         from hermes_cli.config_effective import load_user_config_effective
-        from hermes_cli.fallback_config import get_fallback_chain
-        chain = get_fallback_chain(load_user_config_effective(_active_config_path(), fail_closed=True))
+        from hermes_cli.fallback_config import get_fallback_chain, pinned_model_disables_fallback
+        effective_cfg = load_user_config_effective(_active_config_path(), fail_closed=True)
+        if _session_route_pinned(session) and pinned_model_disables_fallback(effective_cfg):
+            chain: list = []
+        else:
+            chain = get_fallback_chain(effective_cfg)
     except Exception as e:
         logger.warning("fallback chain sync skipped for %s (keeping current chain): %s", sid, e)
         return
     GatewayRunner._apply_fallback_chain_to_agent(agent, chain)
+
+
+def _session_route_pinned(session: dict | None) -> bool:
+    """Whether this desktop/TUI session's model route is explicitly pinned: a live
+    ``session.model_override`` (composer pick, /model switch, resumed explicit runtime) or an armed
+    ``one_turn_model_restore`` (``/model --once``). Bot Chats and default-config sessions are NOT
+    pinned — they follow the profile config and keep the configured chain."""
+    if not isinstance(session, dict):
+        return False
+    return bool(session.get("model_override")) or bool(session.get("one_turn_model_restore"))
+
+
+def _make_agent_fallback_chain(model_override, provider_override, cfg) -> list:
+    """Fallback chain for a new desktop/TUI agent. An explicit route pin (composer pick, /model
+    switch, resumed explicit runtime) drops the chain while ``fallback.pinned_model_policy`` is
+    ``disable`` (default) — the operator chose that provider, usually a different model; same rule
+    a pinned cron job follows (``scoped_fallback_chain``)."""
+    pinned = bool(
+        (isinstance(model_override, dict) and model_override.get("model"))
+        or (isinstance(model_override, str) and model_override.strip())
+        or provider_override)
+    if not pinned:
+        return _load_fallback_model()
+    try:
+        from hermes_cli.fallback_config import pinned_model_disables_fallback
+        if pinned_model_disables_fallback(cfg):
+            return []
+    except Exception:
+        return []
+    return _load_fallback_model()
 
 
 def _background_agent_kwargs(agent, task_id: str) -> dict:
