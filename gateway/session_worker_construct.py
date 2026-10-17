@@ -25,9 +25,14 @@ def _fallback_chain(authority, policy):
     takes its frozen explicit snapshot (never the profile); safe mode carries none."""
     if policy.safe_mode:
         return None
+    from gateway.session_policy import launch_route_pinned
+    from hermes_cli.fallback_config import pinned_model_disables_fallback
+    config = policy.config(authority)
+    if launch_route_pinned(policy) and pinned_model_disables_fallback(config):
+        return None
     if policy.ignore_user_config:
         from hermes_cli.fallback_config import get_fallback_chain
-        return get_fallback_chain(policy.config(authority)) or None
+        return get_fallback_chain(config) or None
     refresh = getattr(authority.runner, '_refresh_fallback_model', None)
     return refresh() if refresh is not None else None
 

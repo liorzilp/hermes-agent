@@ -515,7 +515,8 @@ def _run_agent(
     ``(final_response, run_result)``. Imports are local to keep CLI startup cheap. *ledger* (set when
     ``--usage-file`` is requested) attaches this run's auxiliary usage to the result."""
     from hermes_cli.config import load_config
-    from hermes_cli.runtime_provider import resolve_runtime_with_fallback
+    from hermes_cli.fallback_config import pinned_model_disables_fallback
+    from hermes_cli.runtime_provider import resolve_runtime_provider, resolve_runtime_with_fallback
     from hermes_cli.tools_config import _get_platform_tools
     from run_agent import AIAgent
 
@@ -527,15 +528,30 @@ def _run_agent(
     session_db = _create_session_db_for_oneshot()
     resume_sid, conversation_history, resume_meta = _load_resume_target(session_db, resume)
     choice = _apply_stored_session_runtime(choice, resume_meta, explicit_model=bool((model or "").strip()))
-    # Resolution-time fallback (#81209): a quota-exhausted/expired primary raises AuthError here, before
-    # AIAgent (and its mid-session ``fallback_model`` wiring) exists, so walk the chain like the gateway.
-    runtime, fallback_entry = resolve_runtime_with_fallback(
-        cfg,
-        requested=choice.provider,
-        target_model=choice.model or None,
-        explicit_base_url=choice.base_url,
-        explicit_api_key=choice.api_key,
+    # Resolution-time fallback (#81209): a quota-exhausted/expired primary raises AuthError here,
+    # before AIAgent exists. Explicit CLI route pins must propagate that primary failure unchanged;
+    # otherwise a requested corp/model route can silently cross provider families.
+    explicit_route_pin = bool(
+        isinstance(model, str) and model.strip()
+        or isinstance(provider, str) and provider.strip() and provider.strip().lower() != "auto"
     )
+    pin_disables_fallback = explicit_route_pin and pinned_model_disables_fallback(cfg)
+    if pin_disables_fallback:
+        runtime = resolve_runtime_provider(
+            requested=choice.provider,
+            target_model=choice.model or None,
+            explicit_base_url=choice.base_url,
+            explicit_api_key=choice.api_key,
+        )
+        fallback_entry = None
+    else:
+        runtime, fallback_entry = resolve_runtime_with_fallback(
+            cfg,
+            requested=choice.provider,
+            target_model=choice.model or None,
+            explicit_base_url=choice.base_url,
+            explicit_api_key=choice.api_key,
+        )
     if fallback_entry is not None:
         # The chosen entry names the model that will be sent; the primary's stored api_mode no longer applies.
         choice = dataclasses.replace(choice, model=fallback_entry["model"], provider=runtime.get("provider"),
@@ -587,7 +603,7 @@ def _run_agent(
             session_db=session_db,
             session_id=resume_sid,
             credential_pool=runtime.get("credential_pool"),
-            fallback_model=get_fallback_chain(cfg) or None,
+            fallback_model=None if pin_disables_fallback else get_fallback_chain(cfg) or None,
             # The resolved provider's request body (a custom entry's extra_body), as `hermes chat` passes it.
             request_overrides=runtime.get("request_overrides"),
             ephemeral_system_prompt=skills_prompt,

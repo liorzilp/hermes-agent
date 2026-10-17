@@ -4,6 +4,9 @@ A quota-exhausted / expired primary raises ``AuthError`` from ``resolve_runtime_
 ``AIAgent`` exists, so the mid-session ``fallback_model`` wiring never gets a chance. The shared
 ``resolve_runtime_with_fallback`` helper gives oneshot the gateway's resolution-time behaviour."""
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 from hermes_cli.auth import AuthError
@@ -97,13 +100,80 @@ def test_run_agent_falls_back_when_primary_resolution_raises_auth_error(monkeypa
     monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve)
     monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda _cfg, _p: [])
     monkeypatch.setattr("hermes_cli.mcp_startup.ensure_mcp_discovery_before_agent_build", lambda **_kw: None)
-    monkeypatch.setattr("run_agent.AIAgent", _FakeAgent)
+    monkeypatch.setitem(sys.modules, "run_agent", SimpleNamespace(AIAgent=_FakeAgent))
 
     text, _ = oneshot_mod._run_agent("Health check: reply pong.")
 
     assert text == "pong"
     assert (captured["provider"], captured["model"]) == ("anthropic", "claude-x")
     assert captured["api_key"] == "fb"
+
+
+def test_run_agent_explicit_route_never_calls_fallback_resolver(monkeypatch):
+    """An explicit ``--provider``/``--model`` pin propagates primary failure unchanged."""
+    import hermes_cli.oneshot as oneshot_mod
+
+    cfg = {
+        "fallback": {"pinned_model_policy": "disable"},
+        "fallback_providers": [{"provider": "openai-codex", "model": "gpt-x"}],
+    }
+    monkeypatch.setattr(oneshot_mod, "_create_session_db_for_oneshot", lambda: None)
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: cfg)
+
+    def primary_only(**_kw):
+        raise AuthError("corp route unavailable")
+
+    def forbidden_fallback(**_kw):
+        raise AssertionError("explicit route must not enter fallback resolver")
+
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", primary_only)
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_with_fallback", forbidden_fallback)
+    monkeypatch.setitem(sys.modules, "run_agent", SimpleNamespace(AIAgent=object))
+
+    with pytest.raises(AuthError, match="corp route unavailable"):
+        oneshot_mod._run_agent(
+            "Health check", model="default-corp-llm", provider="corp-ai")
+
+
+def test_run_agent_successful_explicit_route_disarms_midrun_fallback(monkeypatch):
+    """A successful explicit route must not arm ``AIAgent.fallback_model`` either."""
+    import hermes_cli.oneshot as oneshot_mod
+
+    captured = {}
+
+    class _FakeAgent:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def __setattr__(self, name, _value):
+            pass
+
+        def run_conversation(self, _prompt, conversation_history=None):
+            return {"final_response": "pong", "session_id": "s"}
+
+        def close(self):
+            pass
+
+    cfg = {
+        "fallback": {"pinned_model_policy": "disable"},
+        "fallback_providers": [{"provider": "openai-codex", "model": "gpt-x"}],
+    }
+    runtime = {"api_key": "corp", "base_url": "https://corp.example/v1", "provider": "corp-ai",
+               "api_mode": "chat", "credential_pool": None}
+    monkeypatch.setattr(oneshot_mod, "_create_session_db_for_oneshot", lambda: None)
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: cfg)
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", lambda **_kw: runtime)
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_with_fallback",
+                        lambda **_kw: (_ for _ in ()).throw(AssertionError("fallback resolver called")))
+    monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda _cfg, _p: [])
+    monkeypatch.setattr("hermes_cli.mcp_startup.ensure_mcp_discovery_before_agent_build", lambda **_kw: None)
+    monkeypatch.setitem(sys.modules, "run_agent", SimpleNamespace(AIAgent=_FakeAgent))
+
+    text, _ = oneshot_mod._run_agent("Health check", model="default-corp-llm", provider="corp-ai")
+
+    assert text == "pong"
+    assert captured["fallback_model"] is None
+    assert captured["provider"] == "corp-ai"
 
 
 def test_run_agent_forwards_resolved_request_overrides(monkeypatch):
@@ -136,7 +206,7 @@ def test_run_agent_forwards_resolved_request_overrides(monkeypatch):
     monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve)
     monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda _cfg, _p: [])
     monkeypatch.setattr("hermes_cli.mcp_startup.ensure_mcp_discovery_before_agent_build", lambda **_kw: None)
-    monkeypatch.setattr("run_agent.AIAgent", _FakeAgent)
+    monkeypatch.setitem(sys.modules, "run_agent", SimpleNamespace(AIAgent=_FakeAgent))
 
     oneshot_mod._run_agent("say OK")
 

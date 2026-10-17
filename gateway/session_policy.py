@@ -32,6 +32,30 @@ _TURN_PROFILE: ContextVar = ContextVar('follow_profile_read', default=None)  # (
 SURFACES = {'cli': 'cli', 'tui': 'tui', 'gui': 'desktop', 'acp': 'acp', 'tool': 'cli', 'oneshot': 'cli'}
 
 
+def launch_route_pinned(policy) -> bool:
+    """Whether a local session was created with an explicit model route.
+
+    ``LocalSessionPolicy.model`` is not sufficient: session creation fills it from
+    the profile when no route was requested. The immutable request receipt is the
+    authority for whether the caller supplied a model, a non-auto provider, or a
+    base URL.
+    """
+    if policy is None:
+        return False
+    try:
+        request = json.loads(policy.request_json)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    model = request.get("model") or request.get("model_requested")
+    provider = request.get("provider")
+    base_url = request.get("base_url")
+    return bool(
+        isinstance(model, str) and model.strip()
+        or isinstance(provider, str) and provider.strip() and provider.strip().lower() != "auto"
+        or isinstance(base_url, str) and base_url.strip()
+    )
+
+
 @dataclass(frozen=True)
 class LocalSessionPolicy:
     source: str
