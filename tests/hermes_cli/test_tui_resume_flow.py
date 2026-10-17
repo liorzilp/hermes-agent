@@ -147,6 +147,17 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
         "hermes_cli.runtime_provider",
         mod(
             "hermes_cli.runtime_provider",
+            # The fail-closed pin path imports this name even when the test's
+            # unpinned route runs the fallback branch (oneshot imports both).
+            resolve_runtime_provider=lambda **_kwargs: (
+                {
+                    "api_key": "k",
+                    "base_url": "u",
+                    "provider": "p",
+                    "api_mode": "chat_completions",
+                    "credential_pool": None,
+                }
+            ),
             resolve_runtime_with_fallback=lambda _cfg, **_kwargs: (
                 {
                     "api_key": "k",
@@ -214,6 +225,10 @@ def test_oneshot_closes_its_relay_root_before_agent_teardown(monkeypatch, run_fa
                         mod("hermes_cli.models", detect_provider_for_model=lambda *_a, **_k: None))
     monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", mod(
         "hermes_cli.runtime_provider",
+        # The fail-closed pin path imports this name even when the test's
+        # unpinned route runs the fallback branch (oneshot imports both).
+        resolve_runtime_provider=lambda **_k: {"api_key": "k", "base_url": "u", "provider": "p",
+                                               "api_mode": "chat_completions", "credential_pool": None},
         resolve_runtime_with_fallback=lambda _cfg, **_k: ({"api_key": "k", "base_url": "u", "provider": "p",
                                                            "api_mode": "chat_completions", "credential_pool": None}, None),
     ))
