@@ -194,8 +194,10 @@ class GatewaySessionAgentMixin:
         """Whether this gateway session's model route is explicitly pinned AND the policy disables
         fallback for pins (``fallback.pinned_model_policy``, default ``disable``).
 
-        A pin is a live session ``/model`` override or an armed ``--once`` restore. ``user_config``
-        (the gateway config snapshot) avoids a second config read when the caller already holds it.
+        A pin is a live session ``/model`` override, an armed ``--once`` restore, or an
+        explicit model/provider/base-url saved in the local session's immutable launch receipt.
+        ``user_config`` (the gateway config snapshot) avoids a second config read when the caller
+        already holds it.
         """
         from hermes_cli.fallback_config import pinned_model_disables_fallback
         if not pinned_model_disables_fallback(user_config if isinstance(user_config, dict) else None):
@@ -204,7 +206,10 @@ class GatewaySessionAgentMixin:
             return False
         state = self._runner._peek_session_state(session_key)
         override = state.conversation.model_override if state else None
-        return bool(override) or bool(state is not None and state.conversation.one_turn_restore)
+        if bool(override) or bool(state is not None and state.conversation.one_turn_restore):
+            return True
+        from gateway.session_policy import launch_route_pinned, policy_for_source
+        return launch_route_pinned(policy_for_source(self._runner, self._ctx.source))
 
     def _resolve_turn_agent(self, turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr):
         """Reuse this session's cached AIAgent (frozen system prompt + tool schemas → prompt cache
