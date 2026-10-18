@@ -7,6 +7,7 @@ import { coerceGatewayText, coerceThinkingText } from '@/lib/chat-runtime'
 import { playCompletionSound } from '@/lib/completion-sound'
 import { parseErrorSurface } from '@/lib/error-surface'
 import { triggerHaptic } from '@/lib/haptics'
+import { payloadUsage } from '@/lib/usage-payload'
 import { billingCtaLabel, clearBillingBlock, runBillingRecovery, setBillingBlock } from '@/store/billing-block'
 import { clearSettledClarifyRequest } from '@/store/clarify'
 import { setSessionCompacting } from '@/store/compaction'
@@ -421,17 +422,21 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
       }
     }
 
-    if (payload?.usage) {
+    // message.complete carries usage both ways depending on gateway
+    // generation: nested `usage` (converted via tui_usage) or — on wave-A2
+    // publishers — flat snake_case stats. payloadUsage normalizes both.
+    const finalUsage = payloadUsage(payload)
+    if (finalUsage) {
       // Per-session twin FIRST (the statusbar reads it for focused tiles);
       // the primary-only global mirrors the ACTIVE session — ungated it
       // let a background tile's turn overwrite the primary's count.
       updateSessionState(sessionId, state => ({
         ...state,
-        usage: { calls: 0, input: 0, output: 0, total: 0, ...state.usage, ...payload.usage }
+        usage: { calls: 0, input: 0, output: 0, total: 0, ...state.usage, ...finalUsage }
       }))
 
       if (isActiveEvent) {
-        setCurrentUsage(current => ({ ...current, ...payload.usage }))
+        setCurrentUsage(current => ({ ...current, ...finalUsage }))
       }
     }
 
