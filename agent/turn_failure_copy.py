@@ -401,7 +401,8 @@ def exhausted_copy(reason: str, *, label: str, attempts: int, summary: str, rese
     """Chat copy once retries + fallback are exhausted (``max_retries_exhausted_result``). A rate
     limit whose reset window is known names it: an 8.6h plan quota is not "wait a minute" (#89401).
     A stream cut by ``agent.stream_max_lifetime`` names the setting: the provider was responding,
-    so neither waiting nor a backup provider helps."""
+    so neither waiting nor a backup provider helps. For a known one-to-two-minute cooldown, avoid
+    contradicting the exact reset time appended by ``_stamp_limit_reset`` (#140737)."""
     if isinstance(error, StreamLifetimeExceeded):
         return (f"The response was still streaming when agent.stream_max_lifetime ({error.cap:g}s) cut it, "
                 f"on all {attempts} attempts. Raise agent.stream_max_lifetime, or set it to 0 to turn the "
@@ -414,6 +415,8 @@ def exhausted_copy(reason: str, *, label: str, attempts: int, summary: str, rese
         from agent.retry_utils import format_reset_window
         situation = (f"its usage limit resets in {format_reset_window(reset_seconds)}. "
                      "Send /retry after that, or switch models with /model.")
+    elif reset_seconds is not None and 60 <= reset_seconds < 120:
+        situation = "its limit resets soon. Send /retry after the reset time below, or switch models with /model."
     else:
         situation = f"it looks temporarily unavailable. {_NEXT_STEPS_RETRY}"
     return (
