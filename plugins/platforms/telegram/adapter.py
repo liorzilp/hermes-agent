@@ -6656,10 +6656,14 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         if self._should_drop_delayed_delivery():
             self._hold_inbound_event(event, where="photo-enqueue")
             return
+        has_pending_batch = self._pending_photo_batches.get(batch_key) is not None
         self._merge_into_pending(self._pending_photo_batches, batch_key, event)
         self._accept_update()
         prior_task = self._pending_photo_batch_tasks.get(batch_key)
-        if prior_task and not prior_task.done():
+        # Once a flush has popped its batch, a later photo cannot merge into
+        # it.  Cancelling that in-flight dispatch makes Telegram re-hold and
+        # replay an event the gateway has already started handling.
+        if has_pending_batch and prior_task and not prior_task.done():
             prior_task.cancel()
         self._pending_photo_batch_tasks[batch_key] = asyncio.create_task(self._flush_photo_batch(batch_key))
 
@@ -6869,10 +6873,14 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         if self._should_drop_delayed_delivery():
             self._hold_inbound_event(event, where="media-group-enqueue")
             return
+        has_pending_event = self._media_group_events.get(media_group_id) is not None
         self._merge_into_pending(self._media_group_events, media_group_id, event)
         self._accept_update()
         prior_task = self._media_group_tasks.get(media_group_id)
-        if prior_task:
+        # Same guard as the text path: once a flush has popped the album's
+        # merged event, cancelling it mid-dispatch re-holds an event the
+        # gateway has already started handling.
+        if has_pending_event and prior_task and not prior_task.done():
             prior_task.cancel()
         self._media_group_tasks[media_group_id] = asyncio.create_task(self._flush_media_group_event(media_group_id))
 
