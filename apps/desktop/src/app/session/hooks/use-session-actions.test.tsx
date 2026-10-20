@@ -1,3 +1,4 @@
+// health: allow FILE_LINES -- hook-level regression for canonical clarify answerability across warm session.activate (prompts/pending_clarify snapshots): the test rides the resumeSession warm-cache describe it protects; splitting that describe into its own harness sibling file is the follow-up
 import { registryBackendScopeKey } from '@hermes/shared'
 import { useStore } from '@nanostores/react'
 import { act, cleanup, render, waitFor } from '@testing-library/react'
