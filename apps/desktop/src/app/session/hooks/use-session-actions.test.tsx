@@ -4753,6 +4753,132 @@ describe('resumeSession warm-cache mapping integrity', () => {
     expect($clarifyRequests.get()['rt-A']).toMatchObject({ requestId: 'req-warm' })
   })
 
+  // The canonical shared gateway never sends `open_requests`: its resume /
+  // activate snapshots carry live prompts as `prompts` / `pending_clarify`
+  // keyed by a STABLE prompt_id. A canonical clarify card that was answerable
+  // before the session switch must stay answerable after the warm re-activate —
+  // the backend still waits on the prompt, so clearing the card here leaves a
+  // disabled preview over a blocked execution (#repro 2026-10-19: prompts entry
+  // live, open_requests null, running true, later inputs queued).
+  it('keeps a canonical clarify prompt answerable across a warm session.activate', async () => {
+    const runtimeIdByStoredSessionIdRef: MutableRefObject<Map<string, string>> = {
+      current: new Map([['stored-A', 'rt-A']])
+    }
+
+    const state = clientState('stored-A')
+    state.busy = true
+    state.needsInput = true
+    state.messages = [
+      { id: 'cached-user', role: 'user', parts: [{ type: 'text', text: 'help me choose' }] },
+      {
+        id: 'cached-assistant',
+        role: 'assistant',
+        pending: true,
+        parts: [
+          { type: 'text', text: 'I found two paths.' },
+          {
+            type: 'tool-call',
+            toolCallId: 'call-provider',
+            toolName: 'clarify',
+            args: { questions: [{ choices: ['safe', 'fast'], question: 'Which path?' }] },
+            argsText: '{"questions":[{"question":"Which path?","choices":["safe","fast"]}]}'
+          }
+        ]
+      }
+    ]
+
+    const sessionStateByRuntimeIdRef: MutableRefObject<Map<string, ClientSessionState>> = {
+      current: new Map([['rt-A', state]])
+    }
+
+    // The live `clarify.request` event parked an ANSWERABLE card before the
+    // user switched away. Canonical re-delivery on the same socket is deduped
+    // (deliveredPrompts keeps the id), so nothing re-parks it during activate.
+    setClarifyRequest({
+      questions: [{ choices: ['safe', 'fast'], multiSelect: false, qid: 'q0', question: 'Which path?' }],
+      receivedAt: Date.now() / 1000 - 30,
+      requestId: '1fd5d3fc05',
+      sessionId: 'rt-A'
+    })
+
+    vi.mocked(getLatestSessionMessages).mockResolvedValue({
+      messages: [
+        { content: 'help me choose', role: 'user', timestamp: 1 },
+        {
+          content: 'I found two paths.',
+          role: 'assistant',
+          timestamp: 2,
+          tool_calls: [
+            {
+              function: {
+                arguments: '{"questions":[{"question":"Which path?","choices":["safe","fast"]}]}',
+                name: 'clarify'
+              },
+              id: 'call-provider'
+            }
+          ]
+        }
+      ],
+      session_id: 'stored-A'
+    } as never)
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.activate') {
+        return {
+          info: {},
+          message_count: 2,
+          messages: [],
+          messages_omitted: true,
+          pending_clarify: {
+            kind: 'clarify',
+            prompt_id: '1fd5d3fc05',
+            request_id: '1fd5d3fc05',
+            execution_generation: 69,
+            question: 'Which path?',
+            choices: ['safe', 'fast'],
+            multi_select: false,
+            timeout_s: 3600
+          },
+          prompts: [
+            {
+              kind: 'clarify',
+              prompt_id: '1fd5d3fc05',
+              execution_generation: 69,
+              question: 'Which path?',
+              choices: ['safe', 'fast'],
+              multi_select: false,
+              timeout_s: 3600
+            }
+          ],
+          resumed: 'stored-A',
+          running: true,
+          session_id: 'rt-A',
+          session_key: 'stored-A'
+        } as never
+      }
+
+      return {} as never
+    })
+
+    let resume: ((storedSessionId: string, replaceRoute?: boolean) => Promise<unknown>) | null = null
+    render(
+      <ResumeHarness
+        onReady={ready => (resume = ready)}
+        requestGateway={requestGateway}
+        runtimeIdByStoredSessionIdRef={runtimeIdByStoredSessionIdRef}
+        sessionStateByRuntimeIdRef={sessionStateByRuntimeIdRef}
+      />
+    )
+    await waitFor(() => expect(resume).not.toBeNull())
+    await resume!('stored-A', true)
+
+    const resumedState = sessionStateByRuntimeIdRef.current.get('rt-A')
+
+    // The backend still waits on the prompt: the card must stay ANSWERABLE.
+    expect($clarifyRequests.get()['rt-A']).toMatchObject({ requestId: '1fd5d3fc05' })
+    expect(resumedState?.needsInput).toBe(true)
+  })
+
   function answerableClarifyRows(messages: ClientSessionState['messages'] | undefined) {
     return (
       messages?.filter(
