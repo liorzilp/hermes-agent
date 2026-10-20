@@ -818,6 +818,35 @@ export interface SessionResumeResult {
   // handlers before this response resolves; listed here so resume can tell an
   // authoritative "nothing pending" from a request the handler declined.
   open_requests?: Array<{ id: string; method: string; params: Record<string, unknown> & { session_id?: string } }>
+  // Canonical shared-gateway live prompts (approval / clarify) this session
+  // still waits on, keyed by a STABLE `prompt_id` plus the fenced
+  // `execution_generation`; the per-kind projections below are what a resume
+  // consumer reads. The canonical wire never sends `open_requests` — it lists
+  // prompts here instead, so both shapes must be reconciled as one signal.
+  prompts?: Array<{
+    kind?: string
+    prompt_id?: string
+    request_id?: string
+    execution_generation?: number
+    question?: string
+    choices?: string[]
+    multi_select?: boolean
+    timeout_s?: number
+    command?: string
+    description?: string
+  }>
+  // The canonical clarify prompt this session still waits on (kind-projected
+  // from `prompts`; `request_id` mirrors `prompt_id`).
+  pending_clarify?: {
+    kind?: string
+    prompt_id?: string
+    request_id?: string
+    execution_generation?: number
+    question?: string
+    choices?: string[]
+    multi_select?: boolean
+    timeout_s?: number
+  }
   // The connection operation still blocking this session; resume restores the backend-owned card projection.
   pending_connection?: ConnectionRequestPayload
   info?: SessionRuntimeInfo
