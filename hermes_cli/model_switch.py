@@ -1637,7 +1637,6 @@ def _entitlement_bench_refusal(st: _Switch) -> Optional[ModelSwitchResult]:
     try:
         from agent.credential_pool import load_pool
         from hermes_cli.auth import read_credential_pool
-
         if not read_credential_pool(st.target_provider):
             return None
         if not load_pool(st.target_provider).entitlement_benched(st.new_model):
