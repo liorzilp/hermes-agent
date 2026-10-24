@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, UTC
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+import time
 import httpx
 
 from agent.anthropic_credentials import _is_oauth_token, resolve_anthropic_token
@@ -642,9 +643,71 @@ def _fetch_anthropic_account_usage(
     if not _is_oauth_token(token):
         return _snapshot("anthropic", "oauth_usage_api", [], [],
                          unavailable_reason="Anthropic account limits are only available for OAuth-backed Claude accounts.")
+    # THE one poller gate: every surface (async refresh, per-turn session.usage,
+    # picker, /usage, /status, `hermes usage`) funnels through here. A refused
+    # claim returns the cached snapshot (or an honest back-off notice) instead
+    # of hitting the network — the server's poll budget is a handful per hour
+    # and its 429 Retry-After window is SLIDING: an early retry restarts it.
+    from agent.account_usage_cache import (
+        _claim_refresh_reason, _key as _cache_key, cached_account_usage, gate_exempt, _release_refresh,
+    )
+    gate_key = _cache_key("anthropic")
+    now = time.monotonic()
+    if gate_exempt():
+        claimed, reason = True, "exempt"
+    else:
+        claimed, reason = _claim_refresh_reason(gate_key, now)
+    if not claimed:
+        # TUI/CLI `/usage` pass the live agent's OWN OAuth token as api_key —
+        # that IS the default account's credential, so the cached windows are
+        # its data and must be served. Only a genuinely DIFFERENT credential
+        # (a real pool entry) gets the honest empty stand-down, never another
+        # account's windows.
+        same_account = bool(explicit) and explicit == (resolve_anthropic_token() or "").strip()
+        if explicit and not same_account:
+            return _snapshot("anthropic", "oauth_usage_api", [], [],
+                             unavailable_reason=f"Anthropic usage poll standing down ({reason}) — the shared account-slot poll budget is committed; this credential reports no windows this cycle.")
+        # Serve the FRESHER of the caller's own slot (TUI/CLI /usage pass a
+        # base_url, so their previous fetches are remembered there) and the
+        # legacy account-wide gauge (the async worker refreshes only that one).
+        caller_cached = cached_account_usage("anthropic", base_url=base_url)
+        legacy_cached = cached_account_usage("anthropic")
+        candidates = [x for x in (caller_cached, legacy_cached) if x is not None]
+        cached = None
+        if candidates:
+            try:
+                cached = max(candidates, key=lambda x: x.fetched_at)
+            except TypeError:  # mixed naive/aware datetimes: prefer the caller's
+                cached = caller_cached or legacy_cached
+        if cached is not None:
+            from agent.account_usage_cache import as_cache_serve
+
+            return as_cache_serve(cached)
+        from agent.account_usage_cache import as_cache_serve
+
+        return as_cache_serve(_snapshot("anthropic", "oauth_usage_api", [], [],
+                         unavailable_reason=f"Anthropic usage poll standing down ({reason}) — the account-limits cache has no windows yet; try again after the back-off."))
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json", "Content-Type": "application/json",
                "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0"}
-    payload = _get_json("https://api.anthropic.com/api/oauth/usage", headers, timeout=15.0)
+    try:
+        payload = _get_json("https://api.anthropic.com/api/oauth/usage", headers, timeout=15.0)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 429:
+            # Server-imposed poll budget: honor Retry-After (sliding window — an early
+            # retry restarts it). Recorded on the ONE shared slot so every surface
+            # (picker, per-turn refresh, commands) stands down together.
+            from agent.account_usage_cache import note_usage_lockout
+
+            retry_after = exc.response.headers.get("retry-after")
+            try:
+                seconds = float(retry_after) if retry_after else 3600.0
+            except ValueError:
+                seconds = 3600.0
+            note_usage_lockout("anthropic", min(seconds, 7200.0))
+        raise
+    finally:
+        if reason == "claimed":
+            _release_refresh(gate_key)
     windows = _usage_windows(
         payload, (("five_hour", "Current session"), ("seven_day", "Current week"), ("seven_day_opus", "Opus week"),
                   ("seven_day_sonnet", "Sonnet week")), "utilization", "resets_at", fraction=True,
