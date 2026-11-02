@@ -42,8 +42,11 @@ STALE_AFTER_S_BY_PROVIDER: dict[str, float] = {"anthropic": 40 * 60.0}
 # interval for it is deliberately far slower than the generic 2-minute
 # cache throttle. All surfaces (picker, per-turn session.usage, /usage,
 # /status) share this one gate — there is exactly ONE network sampler per
-# provider slot, and everything else reads the cache.
-PROVIDER_MIN_INTERVAL_S: dict[str, float] = {"anthropic": 1800.0}
+# provider slot, and everything else reads the cache. 15 minutes
+# (owner-approved 2026-11-02): 4/hour keeps the account-limits pane
+# current during active sessions; the shared 429 lockout above still
+# stands every surface down together when the server says no.
+PROVIDER_MIN_INTERVAL_S: dict[str, float] = {"anthropic": 900.0}
 
 _logger = logging.getLogger(__name__)
 _lock = threading.Lock()
