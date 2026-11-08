@@ -2017,6 +2017,10 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
                 try:
                     await _await_with_thread_deadline(app.updater.stop(), timeout=_UPDATER_STOP_TIMEOUT)
                 except TimeoutError:
+                    # Kill FIRST (detached, immediate): stop() hanging means the polling task may
+                    # never see a stop event, and the abandoned app below keeps receiving as an
+                    # unregistered receiver that fails closed at admission (#139201).
+                    self._kill_abandoned_polling_app(app, what)
                     message = (
                         f"Telegram updater.stop() did not finish before the {what} deadline; "
                         "rebuilding the adapter instead of reusing an Updater whose lifecycle lock may still be held.")
@@ -2025,6 +2029,65 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         except Exception:
             pass
         return True
+
+    def _kill_abandoned_polling_app(self, app, what: str) -> None:
+        """Arm a detached hard kill for an abandoned app's polling (``updater.stop()`` missed its deadline).
+
+        ``updater.stop()`` hanging means the Updater's lifecycle lock may be held and its polling
+        task never sees the stop event. Every recovery path that abandons such an app (fatal rebuild
+        via the supervisor, ``disconnect()``'s bounded fall-through, exhausted conflict retries)
+        drops the app reference without cancelling that task — so the abandoned app keeps
+        long-polling getUpdates as an *unregistered* receiver that wins the polling race against
+        its own replacement (Telegram 409 conflicts keep the replacement from ever confirming
+        health), and every update it dispatches fails closed at admission
+        (``capture_provenance`` → ``RuntimeStoreError('not_found')``) until process restart.
+
+        Three prongs, because ``stop()`` itself is what hung: clear the Updater's ``running`` gate
+        (the polling loop's ``is_running()`` check — no new polls even if the cancel is swallowed
+        by a cancellation-shielded read), set the private stop event and cancel the private
+        polling task (PTB 22.x name-mangled attrs — same private-API reliance as the
+        ``bot._request`` tuple), then bounded-close the getUpdates request client so the wedged
+        socket's fd is released. Detached and best-effort: never raises into the caller. Any
+        offset regression is absorbed by the successor's inbound dedup (``carry_inbound_dedup``
+        plus duplicate-turn suppression), never delivered twice.
+        """
+        if app is None:
+            return
+
+        async def _kill() -> None:
+            updater = getattr(app, "updater", None)
+            if updater is None:
+                return
+            try:
+                updater._running = False  # the polling loop's is_running() gate — no new polls
+            except Exception:
+                logger.debug("[%s] Abandoned updater running-flag clear failed (non-fatal)",
+                             self.name, exc_info=True)
+            stop_event = getattr(updater, "_Updater__polling_task_stop_event", None)
+            if stop_event is not None:
+                with contextlib.suppress(Exception):
+                    stop_event.set()
+            task = getattr(updater, "_Updater__polling_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+                logger.warning(
+                    "[%s] Cancelled abandoned updater polling task (%s) — it would otherwise keep "
+                    "receiving as an unregistered receiver", self.name, what)
+            # The cancelled read leaves a CLOSE-WAIT fd; close the polling client, bounded.
+            bot = getattr(app, "bot", None)
+            requests = getattr(bot, "_request", None) if bot is not None else None
+            polling_req = requests[0] if isinstance(requests, tuple) and requests else None
+            if polling_req is not None:
+                await self._bounded_request_step(
+                    polling_req.shutdown(), "Abandoned polling client shutdown failed/timed out (non-fatal)")
+
+        try:
+            task = asyncio.ensure_future(_kill())
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+            task.add_done_callback(_consume_abandoned_task)
+        except Exception:
+            logger.debug("[%s] Failed to arm abandoned-app polling kill (%s)", self.name, what, exc_info=True)
 
     def _restart_polling_in_task(self, coro) -> None:
         """Run a recovery coroutine as the tracked in-flight ``_polling_error_task``."""
@@ -2476,6 +2539,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
                 await _await_with_thread_deadline(self._app.updater.stop(), timeout=_UPDATER_STOP_TIMEOUT)
         except TimeoutError:
             logger.warning("[%s] updater.stop() timed out after exhausting conflict retries (likely CLOSE-WAIT socket); proceeding to fatal notify", self.name)
+            self._kill_abandoned_polling_app(self._app, "conflict-retry stop timeout")
         except Exception as stop_error:
             logger.warning(
                 "[%s] Failed stopping Telegram updater after exhausting conflict retries: %s", self.name, stop_error,
@@ -3429,11 +3493,17 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
             try:
                 # Bounded: a CLOSE-WAIT socket can wedge updater.stop() forever; fall through on timeout.
                 if self._app.updater and self._app.updater.running:
+                    stopped = True
                     try:
-                        await self._await_disconnect_step(self._app.updater.stop(), _UPDATER_STOP_TIMEOUT, "updater.stop()")
+                        stopped = await self._await_disconnect_step(self._app.updater.stop(), _UPDATER_STOP_TIMEOUT, "updater.stop()")
                     except Exception as stop_error:
+                        stopped = False
                         logger.warning(
                             "[%s] updater.stop() failed during disconnect: %s", self.name, _redact_telegram_error_text(stop_error))
+                    if not stopped or (self._app.updater and self._app.updater.running):
+                        # stop() detached/failed: the abandoned polling task would keep receiving as
+                        # an unregistered receiver after teardown — kill it before dropping the app.
+                        self._kill_abandoned_polling_app(self._app, "disconnect")
                 # app.stop()/shutdown() can also block on a half-dead httpx pool.
                 # Detach-on-timeout so disconnect always returns (#80598).
                 if self._app.running:
