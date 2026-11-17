@@ -841,6 +841,111 @@ def redeem_codex_reset_credit(
     return _codex_reset_outcome(body, available)
 
 
+# --- Anthropic usage via /v1/messages response headers ---------------------
+# The OAuth usage endpoint (`/api/oauth/usage`) is throttled independently of
+# `/v1/messages` (its 429s with sliding Retry-After are what the claim gate
+# and lockout machinery below exist for). OAuth subscription replies to
+# `/v1/messages` normally carry the account's LIVE unified rate-limit
+# headers — including on a 429 — the same data the Claude Code CLI renders.
+# One tiny probe (haiku, max_tokens 1) reads them at no separate poll budget.
+
+_ANTHROPIC_PROBE_MODEL = "claude-haiku-4-5"
+_ANTHROPIC_PROBE_URL = "https://api.anthropic.com/v1/messages"
+_ANTHROPIC_PROBE_BODY: dict[str, Any] = {
+    "model": _ANTHROPIC_PROBE_MODEL, "max_tokens": 1,
+    "messages": [{"role": "user", "content": "hi"}],
+}
+
+
+def _parse_anthropic_unified_headers(
+    headers: Any,
+) -> Optional[tuple[list[AccountUsageWindow], list[str]]]:
+    """Parse ``anthropic-ratelimit-unified-*`` headers into (windows, details).
+
+    Case-insensitive (httpx.Headers and plain dicts alike). A window is
+    emitted only when BOTH its ``-utilization`` and ``-reset`` headers are
+    present and parse — never synthesized. Non-finite or NEGATIVE
+    utilization drops that window (a negative percent would false-re-arm
+    milestone alerts via the near-zero drain rule; non-finite values would
+    poison JSON snapshots); values above 1.0 pass (an overage window can
+    legitimately exceed the cap). Returns None when no window parsed."""
+    lower = {str(k).lower(): (v if isinstance(v, str) else str(v))
+             for k, v in headers.items()}
+
+    def h(name: str) -> Optional[str]:
+        v = lower.get(name)
+        return v.strip() if isinstance(v, str) and v.strip() else None
+
+    windows: list[AccountUsageWindow] = []
+    for suffix, label in (("5h", "Current session"), ("7d", "Current week")):
+        util = h(f"anthropic-ratelimit-unified-{suffix}-utilization")
+        reset = h(f"anthropic-ratelimit-unified-{suffix}-reset")
+        if util is None or reset is None:
+            continue
+        try:
+            frac = float(util)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(frac) or frac < 0:
+            continue
+        pct = round(frac * 100.0, 1)
+        if not math.isfinite(pct):
+            # A finite-but-huge fraction (e.g. 1e308) overflows the scaling
+            # itself — the scaled percent must be finite too, or the snapshot
+            # carries inf.
+            continue
+        try:
+            reset_at = datetime.fromtimestamp(int(float(reset)), tz=UTC)
+        except (TypeError, ValueError, OSError, OverflowError):
+            continue
+        windows.append(AccountUsageWindow(
+            label=label, used_percent=pct,
+            reset_at=reset_at, scope="account"))
+    if not windows:
+        return None
+    details: list[str] = []
+    status = h("anthropic-ratelimit-unified-status")
+    claim = h("anthropic-ratelimit-unified-representative-claim")
+    if status and status != "allowed":
+        line = f"Rate-limit status: {status}"
+        if claim:
+            line += f" (binding: {claim.replace('_', ' ')})"
+        if h("anthropic-ratelimit-unified-fallback") == "available":
+            line += " — fallback available (not necessarily in use)"
+        details.append(line)
+    return windows, details
+
+
+def _anthropic_usage_via_message_probe(
+    token: str,
+) -> Optional[tuple[list[AccountUsageWindow], list[str]]]:
+    """ONE tiny real request: read the unified rate-limit headers off a
+    ``/v1/messages`` reply (haiku, max_tokens 1, ~9 tokens).
+
+    A 2xx or 429 reply carrying at least one unified window is a successful
+    read — 429 IS quota-exhaustion, the very state being reported, and
+    ``/v1/messages`` has no separate poll budget to protect. Any other
+    outcome (other status, headers absent/unparseable, transport failure)
+    returns None so the caller falls back to the OAuth usage endpoint
+    unchanged. Transport failures return None; unexpected programming
+    errors propagate. Never logs token material."""
+    headers = {"Authorization": f"Bearer {token}",
+               "Content-Type": "application/json",
+               "anthropic-version": "2023-06-01",
+               "anthropic-beta": "oauth-2025-04-20",
+               "User-Agent": "claude-code/2.1.0"}
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            resp = client.post(_ANTHROPIC_PROBE_URL, headers=headers, json=_ANTHROPIC_PROBE_BODY)
+    except httpx.HTTPError:
+        # Transport failure only (connect/read/timeout family): fall back to
+        # the endpoint path — a broken network is not a quota reading.
+        return None
+    if not (200 <= resp.status_code < 300 or resp.status_code == 429):
+        return None
+    return _parse_anthropic_unified_headers(resp.headers)
+
+
 def _fetch_anthropic_account_usage(
     base_url: Optional[str] = None, api_key: Optional[str] = None
 ) -> Optional[AccountUsageSnapshot]:
@@ -902,6 +1007,16 @@ def _fetch_anthropic_account_usage(
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json", "Content-Type": "application/json",
                "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0"}
     try:
+        # Header probe first, inside the claim: fresh windows at no separate
+        # poll budget (a 2xx/429 reply carrying unified headers IS the account
+        # state, to the second). Scoped weekly windows and extra-usage credits
+        # ride the endpoint path below — the headers carry neither. A probe
+        # miss (any non-2xx/429, headers absent, transport failure) falls
+        # through to the endpoint fetch unchanged; the claim releases in the
+        # finally either way.
+        probe = _anthropic_usage_via_message_probe(token)
+        if probe is not None:
+            return _snapshot("anthropic", "messages_header_probe", probe[0], probe[1])
         payload = _get_json("https://api.anthropic.com/api/oauth/usage", headers, timeout=15.0)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 429:
