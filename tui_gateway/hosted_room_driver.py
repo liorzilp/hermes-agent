@@ -92,6 +92,9 @@ class _RecoveryInspection:
 
 _NO_INSPECTION = _RecoveryInspection(terminal=None, active=False, status=None)
 
+# Geometric idle-backoff factor for the supervisor's poll cadence (see _worker_loop).
+_IDLE_BACKOFF_FACTOR = 1.5
+
 
 def _session_kw(profile: str, session_id: str) -> dict[str, str]:
     return {"profile": profile, "session_id": session_id, "source": ROOM_SESSION_SOURCE}
@@ -118,15 +121,19 @@ class HostedRoomRuntime:
         active_poll_interval_seconds: float = 0.25, turn_timeout_seconds: float = 1830.0,
         indeterminate_defer_seconds: float = 60.0, max_concurrent_rooms: int = 4,
         unavailable_retry_min_seconds: float = 1.0, unavailable_retry_max_seconds: float = 30.0,
+        idle_poll_max_seconds: float = 30.0,
         process_generation: str | None = None) -> None:
         positive = dict(
             lease_ttl_seconds=lease_ttl_seconds, poll_interval_seconds=poll_interval_seconds,
             active_poll_interval_seconds=active_poll_interval_seconds,
             turn_timeout_seconds=turn_timeout_seconds,
-            indeterminate_defer_seconds=indeterminate_defer_seconds)
+            indeterminate_defer_seconds=indeterminate_defer_seconds,
+            idle_poll_max_seconds=idle_poll_max_seconds)
         for name, value in positive.items():
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
+        if idle_poll_max_seconds < poll_interval_seconds:
+            raise ValueError("idle_poll_max_seconds must be >= poll_interval_seconds")
         if (not isinstance(max_concurrent_rooms, int) or isinstance(max_concurrent_rooms, bool)
                 or max_concurrent_rooms < 1):
             raise ValueError("max_concurrent_rooms must be a positive integer")
@@ -436,17 +443,35 @@ class HostedRoomRuntime:
 
     # ------------------------------------------------------------------ scheduling
     def _worker_loop(self) -> None:
+        idle_interval = self.poll_interval_seconds
         try:
             while not self._stop.is_set():
                 # Clear before work so a write racing the cycle forces a follow-up pass.
                 self._wake.clear()
+                active = False
                 try:
-                    self._run_cycle()
+                    active = self._run_cycle()
                 except Exception as exc:  # keep independent rooms serviceable
                     self._record_error(f"worker cycle failed: {exc}")
                 with self._status_lock:
                     self._cycles += 1
-                self._wake.wait(self.poll_interval_seconds)
+                # Idle backoff: every cycle re-reads the room bindings (a store round-trip per
+                # served authority), so a driver with nothing to do must not keep paying it at
+                # the active cadence — on installs with many profiles and no hosted rooms that
+                # standing load starves the very store it polls. The idle wait stretches
+                # geometrically (factor _IDLE_BACKOFF_FACTOR) up to idle_poll_max_seconds, kept
+                # as a SATURATED interval — never an unbounded exponent, which would overflow
+                # after ~1700 idle transitions and kill the supervisor thread. Any activity —
+                # rooms found or wakeup() (task admission, room-state change) — resets to full
+                # cadence. A room admitted by a peer gateway with no local wakeup is discovered
+                # within idle_poll_max_seconds instead of poll_interval_seconds.
+                woken = self._wake.wait(
+                    self.poll_interval_seconds if active else idle_interval)
+                if active or woken:
+                    idle_interval = self.poll_interval_seconds
+                else:
+                    idle_interval = min(
+                        self.idle_poll_max_seconds, idle_interval * _IDLE_BACKOFF_FACTOR)
         finally:
             while True:
                 with self._status_lock:
@@ -457,30 +482,38 @@ class HostedRoomRuntime:
                     room_thread.join(self.active_poll_interval_seconds)
             self._release_idle_leases()
 
-    def _run_cycle(self) -> None:
+    def _run_cycle(self) -> bool:
+        """One scheduling pass; ``True`` when the driver has work (bindings exist or a room
+        worker is still running).
+
+        The worker loop uses the result to decide idle backoff: a ``False`` cycle (empty room
+        list and no live room workers) stretches the next wait; a ``True`` cycle keeps full
+        cadence. A binding that disappears while its worker is still finishing must not read as
+        idle — the supervisor stays at full cadence until the worker exits (its exit wakes us)."""
         with self._status_lock:
             supervisor = self._thread
         if threading.current_thread() is not supervisor:
-            for binding in tuple(self._rooms_provider()):
+            bindings = tuple(self._rooms_provider())
+            for binding in bindings:
                 if self._stop.is_set():
-                    return
+                    return bool(bindings)
                 self._run_room_once(binding)
-            return
+            return bool(bindings)
         with self._status_lock:
             self._room_threads = {
                 room_id: t for room_id, t in self._room_threads.items() if t.is_alive()}
             available = self.max_concurrent_rooms - len(self._room_threads)
             active_rooms = set(self._room_threads)
         if available <= 0:
-            return
+            return True  # room workers are already running: stay at full cadence
         bindings = tuple(self._rooms_provider())
         if not bindings:
-            return
+            return bool(active_rooms)
         start = self._room_schedule_cursor % len(bindings)
         self._room_schedule_cursor = (start + 1) % len(bindings)
         for binding in bindings[start:] + bindings[:start]:
             if self._stop.is_set() or available <= 0:
-                return
+                return True
             if binding.room_id in active_rooms:
                 continue
             room_thread = threading.Thread(
@@ -491,6 +524,7 @@ class HostedRoomRuntime:
             active_rooms.add(binding.room_id)
             available -= 1
             room_thread.start()
+        return True
 
     def _run_room_once(self, binding: HostedRoomBinding) -> None:
         try:

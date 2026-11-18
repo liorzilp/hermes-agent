@@ -2006,3 +2006,87 @@ def test_stop_is_bounded_and_does_not_interrupt_active_turn(db: Path):
     assert time.monotonic() - started < 2.0
     assert state.get_task(db, identity)["status"] == "running"
     assert not [call for call in rpc.calls if call[0] == "interrupt"]
+
+
+def test_idle_supervisor_backs_off_and_wakes_on_demand(db: Path):
+    """An empty room list must stretch the poll cadence, and wakeup() must undo it.
+
+    Every cycle re-reads the room bindings — a store round-trip per driver — so a
+    driver with nothing to do must not keep paying it at the active cadence (the
+    standing load of several idle drivers starves the store they poll)."""
+    polls: list[int] = []
+
+    def rooms() -> list[HostedRoomBinding]:
+        polls.append(1)
+        return []
+
+    runtime = HostedRoomRuntime(
+        db_path=db, rooms=rooms, rpc=FakeSessionRPC(), turn_lock=RecordingTurnLocks(),
+        poll_interval_seconds=0.05, idle_poll_max_seconds=0.4)
+    runtime.start()
+    try:
+        time.sleep(1.0)  # without backoff ~20 cycles; with it the waits grow 0.05→0.4s (~6)
+        cycles = runtime.status()["cycles"]
+        assert 3 <= cycles <= 10, f"cycles={cycles}"
+        assert len(polls) >= 3
+        # wakeup() must reset the CADENCE, not just interrupt one wait: at full cadence
+        # (0.05 s) several cycles land inside half a second; a stretched cadence (0.4 s)
+        # manages at most one.
+        runtime.wakeup()
+        _wait_for(lambda: runtime.status()["cycles"] > cycles, timeout=2.0)
+        time.sleep(0.5)
+        assert runtime.status()["cycles"] - cycles >= 3
+    finally:
+        assert runtime.stop(timeout=5.0)
+
+
+def test_idle_supervisor_survives_long_idle_saturation(db: Path):
+    """The idle interval saturates and the worker keeps ticking indefinitely.
+
+    The backoff must be a saturated interval, never ``poll * factor ** idle_polls``:
+    an unbounded exponent overflows after ~1700 idle transitions (~14 h of idling)
+    and kills the supervisor thread outright."""
+    runtime = HostedRoomRuntime(
+        db_path=db, rooms=[], rpc=FakeSessionRPC(), turn_lock=RecordingTurnLocks(),
+        poll_interval_seconds=0.01, idle_poll_max_seconds=0.03)
+    runtime.start()
+    try:
+        time.sleep(1.5)  # cap reached at the fourth idle wait; dozens of saturated transitions follow
+        assert runtime.status()["running"] is True
+        cycles = runtime.status()["cycles"]
+        assert 10 <= cycles <= 90, f"cycles={cycles}"  # ~45 at the 0.03 s cap; ~150 uncapped
+    finally:
+        assert runtime.stop(timeout=5.0)
+
+
+def test_run_cycle_stays_active_while_a_room_worker_is_alive(db: Path):
+    """A binding that disappears while its room worker is still running must not read as idle.
+
+    Regression: the empty-bindings branch returned False even with live room workers,
+    letting the supervisor stretch its poll cadence mid-room."""
+    runtime = HostedRoomRuntime(
+        db_path=db, rooms=[], rpc=FakeSessionRPC(), turn_lock=RecordingTurnLocks(),
+        poll_interval_seconds=0.05)
+    worker = threading.Thread(target=lambda: time.sleep(0.2), daemon=True)
+    worker.start()
+    try:
+        runtime._thread = threading.current_thread()  # take the supervisor branch
+        with runtime._status_lock:
+            runtime._room_threads[ROOM_ID] = worker  # one live worker, slot available
+        assert runtime._run_cycle() is True
+    finally:
+        worker.join(timeout=5.0)
+    assert runtime._run_cycle() is False  # worker gone and no bindings: idle again
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_idle_poll_max_seconds_must_be_positive(db: Path, value):
+    with pytest.raises(ValueError, match="idle_poll_max_seconds"):
+        _runtime(db, FakeSessionRPC(), idle_poll_max_seconds=value)
+
+
+def test_idle_poll_max_seconds_must_not_undercut_the_base_poll(db: Path):
+    with pytest.raises(ValueError, match="idle_poll_max_seconds must be >= poll_interval_seconds"):
+        HostedRoomRuntime(
+            db_path=db, rooms=[], rpc=FakeSessionRPC(), turn_lock=RecordingTurnLocks(),
+            poll_interval_seconds=0.05, idle_poll_max_seconds=0.02)

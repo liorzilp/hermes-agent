@@ -14,6 +14,18 @@ from tui_gateway.hosted_room_service import HostedRoomService
 _OWNER = 'gateway.hosted.owner.v1:'
 
 
+def _owned_room_ids(conn) -> set:
+    """Room ids this authority owns in ``state_meta``.
+
+    ``GLOB``, not ``LIKE``: owner keys are written as ``_OWNER + room_id`` with identifier-safe
+    room ids, so the case-sensitive match is exact — and GLOB anchors on the primary-key index
+    where LIKE's case-insensitive match cannot, full-scanning ``state_meta`` (90k+ rows on a
+    large state.db; measured 22 ms per scan vs 0.03 ms searched) on every supervisor poll cycle.
+    """
+    return {row[0][len(_OWNER):] for row in conn.execute(
+        'SELECT key FROM state_meta WHERE key GLOB ?', (_OWNER + '*',))}
+
+
 class CanonicalHostedRoomService(HostedControls, HostedRoomService):
     def __init__(self, authority, loop):
         self.authority, self.loop = authority, loop
@@ -87,8 +99,9 @@ class CanonicalHostedRoomService(HostedControls, HostedRoomService):
 
     def bindings(self):
         with self.authority.db._read_ctx() as conn:
-            owned = {r[0][len(_OWNER):] for r in conn.execute(
-                'SELECT key FROM state_meta WHERE key LIKE ?', (_OWNER + '%',))}
+            owned = _owned_room_ids(conn)
+        if not owned:
+            return ()  # no owned rooms: skip the list_rooms store round-trip entirely
         return tuple(b for b in super().bindings() if b.room_id in owned)
 
     def _turn_lock(self, profile):
