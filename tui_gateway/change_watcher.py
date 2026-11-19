@@ -239,11 +239,36 @@ def _session_db_content_sig(db_path: Path):
             signature = ("mtime-fallback", mtime)
         else:
             order = " ORDER BY id" if "id" in available else ""
-            rows = conn.execute(f"SELECT {', '.join(fields)} FROM sessions{order}")
+            # Hash the sessions table SQL-side: one aggregate row out of a single
+            # sqlite3_step instead of a Python loop over every row. Every
+            # Python-side row fetch releases and re-takes the GIL, so a busy
+            # gateway iterating tens of thousands of rows per signature pass
+            # starved the API event loop (2026-11-18 busy-form wedge; the
+            # scan re-fires on every commit because heartbeats share the DB
+            # file, #98005). The value encoding is NUL-safe and type-tagged
+            # (2026-11-19 review gate): quote(TEXT) truncates at the first
+            # embedded NUL, so 'a\0x' and 'a\0y' collided — quote(CAST(v AS
+            # BLOB)) is length-based (X'610078' style, full bytes) and
+            # typeof(v) preserves the old repr()-era TEXT-'42' vs INTEGER-42
+            # distinction. quote(NULL) yields the text 'NULL', so NULL never
+            # nullifies the concatenation; the hex/X-quote parts cannot emit
+            # the char(30)/char(31) separators, so field/row splits stay
+            # unambiguous. Digest inputs remain exactly the signature columns.
+            # Overflow caveat: if the payload ever exceeded SQLITE_LIMIT_LENGTH
+            # (1e9 default; this store is orders of magnitude below), the
+            # query raises and, once a good digest is cached, retries keep
+            # returning that stale digest — changes stay invisible until the
+            # payload shrinks below the limit.
+            field_exprs = " || char(31) || ".join(
+                f"quote(typeof({f})) || quote(CAST({f} AS BLOB))" for f in fields
+            )
+            row = conn.execute(
+                f"SELECT COALESCE(group_concat({field_exprs}, char(30)), '') "
+                f"FROM (SELECT {', '.join(fields)} FROM sessions{order})"
+            ).fetchone()
+            payload = row[0] if row is not None else ""
             digest = hashlib.blake2b(digest_size=16)
-            for row in rows:
-                digest.update(repr(tuple(row)).encode("utf-8", "backslashreplace"))
-                digest.update(b"\0")
+            digest.update(payload.encode("utf-8", "backslashreplace"))
             signature = (fields, digest.digest())
     except Exception:
         # A busy/locked read after a good one keeps the last digest and leaves the cached mtime
