@@ -67,25 +67,18 @@ class TestEffectiveRuntimeProvider:
         assert effective_runtime_provider(None, None) == ""
 
 
-class TestPinnedModelDisablesFallback:
-    """An explicitly pinned model (-m, /model, session override) suppresses the chain by default."""
+class TestFallbackEntryRuntimeKwargs:
+    """One kwargs shape for every resolution-time walker and ``hermes fallback check``."""
 
-    def test_default_and_explicit_disable(self):
-        from hermes_cli.fallback_config import pinned_model_disables_fallback
-        assert pinned_model_disables_fallback(None) is True
-        assert pinned_model_disables_fallback({}) is True
-        assert pinned_model_disables_fallback({"fallback": {}}) is True
-        assert pinned_model_disables_fallback(
-            {"fallback": {"pinned_model_policy": "disable"}}) is True
+    def test_carries_provider_model_base_url_and_entry_key(self, monkeypatch):
+        from hermes_cli.fallback_config import fallback_entry_runtime_kwargs
+        monkeypatch.setenv("FB_KEY", "entry-key")
+        assert fallback_entry_runtime_kwargs(
+            {"provider": " custom ", "model": " m ", "base_url": "http://h/v1", "key_env": "FB_KEY"}) == {
+            "requested": "custom", "target_model": "m", "explicit_base_url": "http://h/v1",
+            "explicit_api_key": "entry-key"}
 
-    def test_inherit_policy_keeps_the_chain_on_pins(self):
-        from hermes_cli.fallback_config import pinned_model_disables_fallback
-        assert pinned_model_disables_fallback(
-            {"fallback": {"pinned_model_policy": "inherit"}}) is False
-        assert pinned_model_disables_fallback(
-            {"fallback": {"pinned_model_policy": " INHERIT "}}) is False
-
-    def test_unknown_values_fail_closed_to_disable(self):
-        from hermes_cli.fallback_config import pinned_model_disables_fallback
-        assert pinned_model_disables_fallback(
-            {"fallback": {"pinned_model_policy": "whatever"}}) is True
+    def test_omits_absent_endpoint_and_key(self):
+        from hermes_cli.fallback_config import fallback_entry_runtime_kwargs
+        assert fallback_entry_runtime_kwargs({"provider": "nous", "model": "m"}) == {
+            "requested": "nous", "target_model": "m"}
