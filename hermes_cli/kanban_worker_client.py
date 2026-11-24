@@ -1,4 +1,57 @@
 """Dispatcher subprocess: submit one claim to its profile owner; never run an agent."""
+# The dispatcher's Python control plane must not import from a task-controlled workspace
+# (Claude advisory #1, 2026-11-04). With ``python -m`` the process cwd is ``sys.path[0]``,
+# so a task workspace on the cwd made every stdlib-name file there importable: one
+# leftover ``inspect.py`` crashed workers twice, deterministically, inside
+# ``import hermes_bootstrap`` (``AttributeError: module 'inspect' has no attribute
+# 'signature'``; log t_c4dbaf17). The dispatcher now spawns this process from outside
+# the workspace and passes ``-P`` where the interpreter knows it, but those are
+# per-version tools — this guard is the version-independent invariant, and it must run
+# before any other import so no shadowed module can load first. ``sys`` and ``os`` are
+# safe to import here: interpreter startup (``site``) loads them before ``-m`` prepends
+# the cwd, so a workspace file named ``os.py`` or ``sys.py`` cannot displace them by
+# the time this module executes.
+import os as _os
+import sys as _sys
+
+# Distinct nonzero exit so the dead-worker sweep and crash diagnostics can tell the
+# fail-closed guard apart from every honest refusal.
+WORKSPACE_ON_SYSPATH_EXIT = 91
+
+
+def _refuse_workspace_imports() -> None:
+    """Abort loudly when any ``sys.path`` entry resolves inside the task workspace.
+
+    ``HERMES_KANBAN_WORKSPACE`` is the dispatcher's pin of where this worker's task
+    does its work — task-controlled bytes. No import path may point there, whatever
+    put the entry in (cwd, PYTHONPATH, a relocated pin): every entry is resolved —
+    symlinks included — before the comparison.
+    """
+    workspace = _os.environ.get("HERMES_KANBAN_WORKSPACE")
+    if not workspace:
+        return
+    norm = _os.path.normcase(_os.path.realpath(workspace))
+    sep = _os.sep
+    for entry in _sys.path:
+        if not entry:  # '' denotes the cwd on some launch forms
+            try:
+                entry = _os.getcwd()
+            except OSError:
+                continue  # a deleted cwd cannot be the workspace; the bootstrap recovers it
+        resolved = _os.path.normcase(_os.path.realpath(entry))
+        if resolved == norm or resolved.startswith(norm + sep):
+            _sys.stderr.write(
+                "hermes kanban worker: refusing to start: task workspace "
+                f"{workspace!r} is importable from sys.path entry {entry!r} — the "
+                "dispatcher's Python control plane must not import from a "
+                "task-controlled workspace (stdlib-shadow crash class). Spawn the "
+                "worker with a cwd outside the workspace.\n")
+            _sys.stderr.flush()
+            raise SystemExit(WORKSPACE_ON_SYSPATH_EXIT)
+
+
+_refuse_workspace_imports()
+
 # Spawned as a bare ``sys.executable -m``: in a PM install that interpreter carries no dependencies
 # until hermes_bootstrap selects the committed environment, so it must be the first import.
 try:

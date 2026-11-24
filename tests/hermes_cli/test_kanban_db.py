@@ -1664,7 +1664,14 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
     for resolved in ([sys.executable, "-m", "hermes_cli.main"], ["/opt/hermes/bin/hermes"]):
         monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda resolved=resolved: resolved)
         kbd._default_spawn(task, str(tmp_path / "ws"))
-        assert captured["cmd"][-3:] == [sys.executable, "-m", "hermes_cli.kanban_worker_client"]
+        # ``-P`` (3.11+, the stdlib-shadow cure) keeps the spawn cwd off sys.path; the
+        # interpreter here runs the committed floor or newer, so the flag is always present.
+        expected_tail = (
+            ["-P", "-m", "hermes_cli.kanban_worker_client"]
+            if sys.version_info >= (3, 11)
+            else ["-m", "hermes_cli.kanban_worker_client"]
+        )
+        assert captured["cmd"][-len(expected_tail):] == expected_tail
         assert captured["env"]["PYTHONPATH"].split(os.pathsep)[0] == root
 
 

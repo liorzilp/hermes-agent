@@ -2637,9 +2637,42 @@ def _retag_legacy_worker_sessions(workspaces_root_path: str) -> None:
 
 
 def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> list[str]:
-    """The profile owner executes; this subprocess only waits for its receipt."""
+    """The profile owner executes; this subprocess only waits for its receipt.
+
+    ``-P`` (3.11+) keeps the spawn cwd off ``sys.path``: with ``-m`` alone the cwd is
+    ``sys.path[0]``, which made a task workspace importable and let one leftover
+    ``inspect.py`` shadow the stdlib for every worker in it (2026-11-04 crash class;
+    ``PYTHONSAFEPATH`` the env var is silently ignored on the same older interpreters,
+    so the flag — not an env var — is what is gated). Interpreters that do not know
+    ``-P`` reject it outright, so they are skipped and rely on the safe spawn cwd plus
+    the client's fail-closed guard for the same invariant.
+    """
     import sys
-    return [sys.executable, "-m", "hermes_cli.kanban_worker_client"]
+    argv = [sys.executable]
+    # UP036: the declared floor is 3.11, but the field has run this exact path on a
+    # 3.9 interpreter (2026-11-04 advisory evidence), where ``-P`` is a hard argv
+    # error — the gate keeps the flag layer safe below the floor; the client's
+    # fail-closed guard is the version-independent half.
+    if sys.version_info >= (3, 11):  # noqa: UP036
+        argv.append("-P")
+    argv += ["-m", "hermes_cli.kanban_worker_client"]
+    return argv
+
+
+def _worker_spawn_cwd() -> str:
+    """The directory the worker subprocess is launched from — never the task workspace.
+
+    With ``python -m`` the process cwd is ``sys.path[0]``, so a task-controlled
+    workspace as the cwd made every stdlib-name file there importable: one leftover
+    ``inspect.py`` crashed two workers inside ``import hermes_bootstrap``
+    (``AttributeError: module 'inspect' has no attribute 'signature'``, 2026-11-04 —
+    shared workspace t_5dcbfbc6, log t_c4dbaf17). The dispatcher's own checkout root is
+    the directory the PYTHONPATH pin below already places on the worker's ``sys.path``,
+    so launching from it adds no import surface; cron's external worker launches from
+    its repo root for the same reason (#112729). ``TERMINAL_CWD`` — not the process
+    cwd — keeps the worker's file tools and context loading anchored on the workspace.
+    """
+    return str(Path(__file__).resolve().parent.parent)
 
 
 def _open_worker_log(task: Task, board: Optional[str]):
@@ -2761,12 +2794,12 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # user's home and workers load the gateway's AGENTS.md. file_tools rejects
     # relative / sentinel values, so only set a real absolute directory.
     # Pin TERMINAL_CWD to the task's workspace so the worker's file tools and context-file loader anchor on
-    # the workspace, not whatever cwd the dispatching gateway happened to export. The worker subprocess is
-    # already launched with cwd=workspace, but TERMINAL_CWD takes precedence over the process cwd in both
-    # file_tools._resolve_base_dir (#41312 — relative write_file paths were landing in the gateway user's
-    # home) and build_context_files_prompt (#34619 — workers loaded the dispatching gateway's AGENTS.md
-    # instead of the task's). Setting it to the workspace fixes both: the workspace is where the task's work
-    # actually happens.
+    # the workspace, not whatever cwd the dispatching gateway happened to export. TERMINAL_CWD takes precedence
+    # over the process cwd in both file_tools._resolve_base_dir (#41312 — relative write_file paths were
+    # landing in the gateway user's home) and build_context_files_prompt (#34619 — workers loaded the
+    # dispatching gateway's AGENTS.md instead of the task's). It is also the ONLY cwd anchoring the worker
+    # gets: the subprocess itself is deliberately launched from outside the workspace
+    # (_worker_spawn_cwd) so its python never imports task-controlled bytes.
     if workspace and os.path.isabs(workspace) and os.path.isdir(workspace):
         env["TERMINAL_CWD"] = workspace
     if task.branch_name:
@@ -2817,7 +2850,9 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     try:
         proc = subprocess.Popen(
             cmd,
-            cwd=workspace if os.path.isdir(workspace) else None,
+            # Never the task workspace: with ``-m`` the cwd is sys.path[0] and every
+            # stdlib-name file there shadows the stdlib (see _worker_spawn_cwd).
+            cwd=_worker_spawn_cwd(),
             stdin=subprocess.DEVNULL,
             stdout=log_f,
             stderr=subprocess.STDOUT,

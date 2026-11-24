@@ -84,7 +84,8 @@ class Board:
             encoding="utf-8",
         )
         (self.hermes_home / ".env").write_text("OPENAI_API_KEY=sk-fake-e2e\n", encoding="utf-8")
-        # Workers run with cwd=<task workspace>; the wrapper pins THIS checkout on the path.
+        # Workers run from a cwd outside the task workspace (stdlib-shadow crash class,
+        # see _worker_spawn_cwd); the wrapper pins THIS checkout on the path.
         self.hermes_bin = self.root / "hermes-bin"
         self.hermes_bin.write_text(
             "#!/bin/sh\n"
