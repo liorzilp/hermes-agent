@@ -347,18 +347,116 @@ def test_worker_boots_clean_over_a_hostile_sitecustomize_through_the_dispatcher_
         f"worker never wrote its exit trailer — boot did not complete:\n{proc.stderr}")
 
 
-def test_dispatcher_refuses_a_workspace_containing_the_checkout(tmp_path, monkeypatch):
-    """A workspace that contains the checkout cannot be isolated: the spawn cwd AND
-    the PYTHONPATH pin resolve inside it, and ``-m`` resolves the ``hermes_cli``
-    package from there before the client's guard can run. The dispatcher must
-    refuse the spawn with a named, host-level error (never charged to the card)
-    instead of launching a worker whose control plane imports task-controlled
-    bytes."""
-    _capture_spawn(monkeypatch, tmp_path)
-    degenerate = REPO_ROOT.parent  # contains the checkout _worker_spawn_cwd() returns
+def test_worker_boots_clean_through_a_relative_pythonpath_entry(
+        tmp_path, monkeypatch):
+    """The round-2 relative-entry attack, end to end: the dispatcher process runs
+    from a DIFFERENT cwd than the spawn cwd, and the inherited PYTHONPATH entry
+    is a relative name that resolves — from the spawn cwd (the checkout root)
+    — through an attacker-planted symlink into the workspace. The scrubbed
+    child env must carry no such entry (dropped or made absolute against the
+    spawn cwd), so the child boots clean over the hostile sitecustomize."""
+    ws = _sitecustomize_workspace(tmp_path)
+    link_name = f".wslink-r3-{os.getpid()}"
+    link = REPO_ROOT / link_name
+    link.symlink_to(ws, target_is_directory=True)
+    captured = _capture_spawn(monkeypatch, tmp_path)
+    # The dispatching process sits somewhere else entirely: a relative
+    # PYTHONPATH entry resolves differently for it than for the child.
+    elsewhere = tmp_path / "dispatcher-cwd"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("PYTHONPATH", link_name)
+    try:
+        kanban_db_dispatch._default_spawn(_task(), str(ws))
+        monkeypatch.undo()
+        child_env = {k: v for k, v in captured["env"].items()
+                     if not k.startswith("HERMES_KANBAN")
+                     and k not in {"TERMINAL_CWD", "HERMES_SESSION_SOURCE", "HERMES_TENANT",
+                                   "HERMES_PROFILE", "HERMES_BIN", "PYTEST_CURRENT_TEST"}}
+        child_env["HERMES_KANBAN_WORKSPACE"] = str(ws)
+        # The symlink still exists here: a surviving relative entry resolves
+        # into the workspace from the restored cwd (the checkout root).
+        entries = child_env["PYTHONPATH"].split(os.pathsep)
+        root = os.path.normcase(os.path.realpath(ws))
+        inside = [e for e in entries
+                 if os.path.normcase(os.path.realpath(e)) == root
+                 or os.path.normcase(os.path.realpath(e)).startswith(root + os.sep)]
+        assert not inside, f"the relative entry reached the child importable: {inside}"
+        proc = subprocess.run(
+            captured["cmd"], cwd=str(captured["cwd"]), env=child_env,
+            capture_output=True, text=True, timeout=180, check=False)
+        _assert_never_imported_the_shadow(proc)
+        assert SITECUSTOMIZE_SENTINEL not in proc.stderr, (
+            f"the workspace sitecustomize executed through the relative entry "
+            f"(rc={proc.returncode}):\n{proc.stderr}")
+        assert "Kanban owner refused" in proc.stderr, (
+            f"worker did not reach its clean refusal (rc={proc.returncode}):\n{proc.stderr}")
+        assert f"{EXIT_TRAILER}1" in proc.stderr, (
+            f"worker never wrote its exit trailer — boot did not complete:\n{proc.stderr}")
+    finally:
+        link.unlink(missing_ok=True)
 
-    with pytest.raises(kanban_db_dispatch.WorkspaceContainsCheckout) as excinfo:
-        kanban_db_dispatch._default_spawn(_task(), str(degenerate))
-    message = str(excinfo.value)
-    assert str(degenerate) in message, message
-    assert str(REPO_ROOT) in message, message
+
+def test_dispatcher_refuses_every_checkout_workspace_overlap(tmp_path, monkeypatch):
+    """Every overlap DIRECTION must be refused at dispatch: a workspace that
+    contains the checkout (including the filesystem root — ``root + os.sep``
+    must not collapse to ``//`` and match nothing), one that equals it, and
+    one inside it at an importable path (``-m`` resolves whatever module
+    names that path spells — ``hermes_cli`` itself in the worst case — before
+    the client's guard can run). Dotted directories are not module names:
+    repo-internal task workspaces (``.worktrees``) stay spawnable."""
+    captured = _capture_spawn(monkeypatch, tmp_path)
+    degenerate_shapes = [
+        str(REPO_ROOT.parent),           # contains the checkout
+        "/",                            # the filesystem root
+        str(REPO_ROOT),                 # equals the checkout
+        str(REPO_ROOT / "hermes_cli"),  # inside it, importable — worst case
+    ]
+    for shape in degenerate_shapes:
+        with pytest.raises(kanban_db_dispatch.WorkspaceCheckoutOverlap) as excinfo:
+            kanban_db_dispatch._default_spawn(_task(), shape)
+        assert str(REPO_ROOT) in str(excinfo.value), str(excinfo.value)
+
+    # The dotted, non-importable carve-out: a repo's own task workspaces stay
+    # spawnable — this is the supported worktree shape inside a checkout.
+    kanban_db_dispatch._default_spawn(_task(), str(REPO_ROOT / ".worktrees" / "t_keep"))
+    assert "cmd" in captured, "the dotted non-importable workspace must still spawn"
+
+
+def test_scrub_checks_relative_entries_the_way_the_child_resolves_them(tmp_path):
+    """Relative PYTHONPATH entries are interpreted against the spawn cwd — the
+    child's resolution base — not the scrubbing process's cwd: a checkout-
+    relative symlink to the workspace must be dropped, and every kept
+    relative entry handed down absolute so nothing downstream can re-read it
+    against a different base."""
+    ws = _sitecustomize_workspace(tmp_path)
+    spawn_cwd = tmp_path / "spawn-cwd"
+    spawn_cwd.mkdir()
+    (spawn_cwd / "wslink").symlink_to(ws, target_is_directory=True)
+    (spawn_cwd / "kept-rel").mkdir()
+    env = {"PYTHONPATH": os.pathsep.join([str(REPO_ROOT), "wslink", "kept-rel"])}
+
+    kanban_db_dispatch._scrub_workspace_from_pythonpath(env, str(ws), str(spawn_cwd))
+
+    entries = env["PYTHONPATH"].split(os.pathsep)
+    root = os.path.normcase(os.path.realpath(ws))
+    inside = [e for e in entries
+              if os.path.normcase(os.path.realpath(e)) == root
+              or os.path.normcase(os.path.realpath(e)).startswith(root + os.sep)]
+    assert not inside, f"workspace still importable from the worker env: {inside}"
+    assert str(REPO_ROOT) in entries, "absolute entries must survive unchanged"
+    assert str(spawn_cwd / "kept-rel") in entries, (
+        "a kept relative entry must be handed down as its spawn-cwd absolute form")
+    assert all(os.path.isabs(e) for e in entries), entries
+
+
+def test_worker_fails_closed_for_a_filesystem_root_workspace(tmp_path):
+    """A workspace pinned at the filesystem root contains every importable
+    path: the client guard must refuse (exit 91), never boot past it."""
+    proc = _spawn_client(
+        Path("/"), tmp_path / "home", cwd=REPO_ROOT,
+        argv=[sys.executable, "-m", "hermes_cli.kanban_worker_client"],
+        pythonpath=str(REPO_ROOT))
+    assert GUARD_MARKER in proc.stderr, (
+        f"filesystem-root workspace did not fail closed (rc={proc.returncode}):\n"
+        f"{proc.stderr}")

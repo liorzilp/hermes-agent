@@ -30,12 +30,16 @@ def _refuse_workspace_imports() -> None:
     ``HERMES_KANBAN_WORKSPACE`` is the dispatcher's pin of where this worker's task
     does its work — task-controlled bytes. No import path may point there, whatever
     put the entry in (cwd, PYTHONPATH, a relocated pin): every entry is resolved —
-    symlinks included — before the comparison.
+    symlinks included — before the comparison. A workspace pinned at the
+    filesystem root contains every importable path and trips the guard like
+    any other containment (trailing separators are stripped from the root so
+    ``/`` does not build ``//`` and match nothing).
     """
     workspace = _os.environ.get("HERMES_KANBAN_WORKSPACE")
     if not workspace:
         return
     norm = _os.path.normcase(_os.path.realpath(workspace))
+    root = norm.rstrip(_os.sep)
     sep = _os.sep
     for entry in _sys.path:
         if not entry:  # '' denotes the cwd on some launch forms
@@ -44,7 +48,7 @@ def _refuse_workspace_imports() -> None:
             except OSError:
                 continue  # a deleted cwd cannot be the workspace; the bootstrap recovers it
         resolved = _os.path.normcase(_os.path.realpath(entry))
-        if resolved == norm or resolved.startswith(norm + sep):
+        if resolved == root or resolved.startswith(root + sep):
             _sys.stderr.write(
                 "hermes kanban worker: refusing to start: task workspace "
                 f"{workspace!r} is importable from sys.path entry {entry!r} — the "

@@ -2163,10 +2163,10 @@ def _dispatch_lane_task(
         from tools.process_registry import RestartSafeScopeUnavailable
 
         # The host refused the spawn (no restart-safe scope, or a workspace that
-        # contains the checkout — both host-level shapes, never the card's
+        # overlaps the checkout — both host-level shapes, never the card's
         # property): nothing about the card ran, so it must not spend the
         # card's retry budget (#114720).
-        infrastructure = isinstance(exc, (RestartSafeScopeUnavailable, WorkspaceContainsCheckout))
+        infrastructure = isinstance(exc, (RestartSafeScopeUnavailable, WorkspaceCheckoutOverlap))
         if infrastructure:
             _kb._log.warning("kanban dispatcher: spawn of %s deferred, host cannot place the worker: %s", claimed.id, exc)
         if _record_task_failure(
@@ -2677,24 +2677,27 @@ def _worker_spawn_cwd() -> str:
     its repo root for the same reason (#112729). ``TERMINAL_CWD`` — not the process
     cwd — keeps the worker's file tools and context loading anchored on the workspace.
 
-    The one degenerate shape — a workspace that equals or contains this checkout —
-    cannot satisfy "outside the workspace" at all (the PYTHONPATH pin points here
-    too, and ``-m`` resolves the ``hermes_cli`` package from here before the
-    client's guard can run); ``_default_spawn`` refuses it up front
-    (``WorkspaceContainsCheckout``) instead of spawning into it.
+    The degenerate overlaps — a workspace that equals, contains, or sits
+    inside this checkout at an importable path — cannot satisfy "outside the
+    workspace" (the PYTHONPATH pin points here too, and ``-m`` resolves module
+    names from here before the client's guard can run);
+    ``_default_spawn`` refuses them up front (``WorkspaceCheckoutOverlap``)
+    instead of spawning into them.
     """
     return str(Path(__file__).resolve().parent.parent)
 
 
-class WorkspaceContainsCheckout(RuntimeError):
-    """The task workspace contains the dispatcher checkout — isolation is impossible.
+class WorkspaceCheckoutOverlap(RuntimeError):
+    """The task workspace overlaps the dispatcher checkout — isolation is impossible.
 
-    Host-level, never a property of the card's work: with the checkout inside
-    ``HERMES_KANBAN_WORKSPACE`` every spawn shape imports task-controlled bytes
-    (the PYTHONPATH pin, the spawn cwd, and ``-m``'s package resolution all
-    point into the workspace), so the dispatcher refuses the spawn instead.
-    Callers that keep per-job retry budgets must not charge it — the same
-    accounting as ``RestartSafeScopeUnavailable`` (#114720).
+    Either direction breaks the invariant: a workspace that contains the
+    checkout (the spawn cwd, the PYTHONPATH pin and ``-m``'s package
+    resolution all land inside task-controlled bytes), or a workspace inside
+    the checkout at an importable path (the child imports whatever module
+    names the workspace's checkout-relative path spells — ``hermes_cli``
+    itself in the worst case). Host-level, never a property of the card's
+    work; callers that keep per-job retry budgets must not charge it — the
+    same accounting as ``RestartSafeScopeUnavailable`` (#114720).
     """
 
 
@@ -2703,12 +2706,36 @@ def _path_resolves_inside(entry: str, normalized_root: str) -> bool:
 
     The same containment semantics the worker client's fail-closed guard uses,
     duplicated here because that guard may import nothing before it runs.
+    The root's trailing separators are stripped first: for the filesystem
+    root itself (``/`` -> ``""``) every absolute path then matches, which is
+    the truth — a workspace pinned at ``/`` contains the whole control plane
+    (``root + os.sep`` would otherwise build ``//`` and match nothing).
     """
     resolved = os.path.normcase(os.path.realpath(entry))
-    return resolved == normalized_root or resolved.startswith(normalized_root + os.sep)
+    root = normalized_root.rstrip(os.sep)
+    return resolved == root or resolved.startswith(root + os.sep)
 
 
-def _scrub_workspace_from_pythonpath(env: dict, workspace: str) -> dict:
+def _workspace_overlaps_checkout(workspace_normalized: str, checkout_normalized: str) -> bool:
+    """True when the workspace and the checkout overlap in either direction.
+
+    ``checkout inside workspace`` refuses outright. ``workspace inside
+    checkout`` refuses only when the workspace's checkout-relative path is
+    importable — its first component does not start with ``.``: a dotted
+    directory is not a module name, so ``.worktrees``-style task workspaces
+    inside a repo are deliberately allowed through.
+    """
+    if _path_resolves_inside(checkout_normalized, workspace_normalized):
+        return True
+    if not _path_resolves_inside(workspace_normalized, checkout_normalized):
+        return False
+    rel = os.path.relpath(workspace_normalized, checkout_normalized)
+    if rel == os.curdir:
+        return True
+    return not rel.split(os.sep)[0].startswith(".")
+
+
+def _scrub_workspace_from_pythonpath(env: dict, workspace: str, spawn_cwd: str) -> dict:
     """Drop worker-env PYTHONPATH entries that resolve inside the task workspace.
 
     ``site`` imports ``sitecustomize`` from PYTHONPATH during interpreter
@@ -2716,17 +2743,30 @@ def _scrub_workspace_from_pythonpath(env: dict, workspace: str) -> dict:
     guard included — and ``-P`` does not ignore PYTHONPATH. The dispatcher
     owns the environment it hands the worker: no entry of it may make the
     workspace importable at startup, whatever put the entry there (inherited
-    from the dispatching process, a routed profile, an operator shell). The
-    checkout pin is added before this runs and is never inside the workspace —
-    a workspace that contains the checkout is refused earlier
-    (``WorkspaceContainsCheckout``).
+    from the dispatching process, a routed profile, an operator shell).
+
+    Entries are checked the way the CHILD resolves them — relative entries
+    against the spawn cwd, not this process's cwd — and every kept relative
+    entry is rewritten to its spawn-cwd absolute form, so nothing downstream
+    of the scrub can resolve an entry against a different base than it was
+    checked against. The checkout pin is added before this runs and is never
+    inside the workspace — a workspace overlapping the checkout is refused
+    earlier (``WorkspaceCheckoutOverlap``).
     """
+    if not workspace:
+        return env
     raw = env.get("PYTHONPATH")
     if not raw:
         return env
     normalized_root = os.path.normcase(os.path.realpath(workspace))
-    kept = [e for e in raw.split(os.pathsep)
-            if e and not _path_resolves_inside(e, normalized_root)]
+    kept: list[str] = []
+    for entry in raw.split(os.pathsep):
+        if not entry:
+            continue
+        child_entry = entry if os.path.isabs(entry) else os.path.join(spawn_cwd, entry)
+        if _path_resolves_inside(child_entry, normalized_root):
+            continue
+        kept.append(child_entry)
     env["PYTHONPATH"] = os.pathsep.join(kept)
     return env
 
@@ -2793,17 +2833,21 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     if not task.assignee:
         raise ValueError(f"task {task.id} has no assignee")
 
-    # The isolation invariant is unsatisfiable when the workspace contains this
-    # checkout: the spawn cwd AND the PYTHONPATH pin below both resolve inside
-    # task-controlled bytes, and ``-m`` resolves the hermes_cli package from
-    # there before the client's guard can run. Refuse at dispatch — named,
-    # host-level, never charged to the card.
-    if _path_resolves_inside(_worker_spawn_cwd(),
-                             os.path.normcase(os.path.realpath(workspace))):
-        raise WorkspaceContainsCheckout(
-            f"task {task.id}: workspace {workspace} contains the dispatcher "
-            f"checkout ({_worker_spawn_cwd()}) — the worker's spawn cwd and "
-            f"PYTHONPATH pin would resolve inside task-controlled bytes; "
+    # The isolation invariant is unsatisfiable when the workspace overlaps this
+    # checkout in EITHER direction: containing it (the spawn cwd AND the
+    # PYTHONPATH pin below resolve inside task-controlled bytes) or inside it
+    # at an importable path (``-m`` resolves whatever module names that path
+    # spells — ``hermes_cli`` itself in the worst case — before the client's
+    # guard can run). Refuse at dispatch — named, host-level, never charged
+    # to the card.
+    spawn_cwd = _worker_spawn_cwd()
+    if _workspace_overlaps_checkout(
+            os.path.normcase(os.path.realpath(workspace)),
+            os.path.normcase(os.path.realpath(spawn_cwd))):
+        raise WorkspaceCheckoutOverlap(
+            f"task {task.id}: workspace {workspace} overlaps the dispatcher "
+            f"checkout ({spawn_cwd}) — the worker's spawn cwd, PYTHONPATH pin "
+            f"and module resolution would reach task-controlled bytes; "
             f"refusing the spawn (move the workspace, or run the dispatcher "
             f"from a checkout outside it)")
 
@@ -2913,8 +2957,9 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # ``site`` imports sitecustomize from PYTHONPATH before any module code
     # (the client's fail-closed guard included) and ``-P`` does not ignore
     # PYTHONPATH — strip every workspace-resolving entry from the env we hand
-    # the child, whatever put it there.
-    env = _scrub_workspace_from_pythonpath(env, workspace)
+    # the child, whatever put it there; relative entries are checked the way
+    # the child resolves them and handed down absolute.
+    env = _scrub_workspace_from_pythonpath(env, workspace, spawn_cwd)
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
     # that is performing the handoff.
