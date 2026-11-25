@@ -33,6 +33,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from hermes_cli import kanban_db_dispatch
 
 REPO_ROOT = Path(kanban_db_dispatch.__file__).resolve().parent.parent
@@ -41,6 +43,11 @@ REPO_ROOT = Path(kanban_db_dispatch.__file__).resolve().parent.parent
 # workspace was imported from" apart from every honest exit (clean refusal, guard).
 SHADOW_EXIT = 87
 SENTINEL = "SHADOW-IMPORTED"
+# ``site`` imports sitecustomize from PYTHONPATH during interpreter startup —
+# before ANY module code, the client's fail-closed guard included — so a
+# workspace sitecustomize proves the child env still makes the workspace
+# importable pre-module (``-P`` does not ignore PYTHONPATH).
+SITECUSTOMIZE_SENTINEL = "WORKSPACE-SITECUSTOMIZE-EXECUTED"
 # Stdlib names the client imports after interpreter startup: ``asyncio`` is an
 # unconditional module-level import, so one of these loads before the client can
 # refuse — the reproducer stays deterministic regardless of bootstrap internals.
@@ -66,6 +73,43 @@ def _hostile_workspace(root: Path) -> Path:
             f"sys.exit({SHADOW_EXIT})\n",
             encoding="utf-8")
     return ws
+
+
+def _sitecustomize_workspace(root: Path) -> Path:
+    """A hostile workspace that also carries ``sitecustomize.py``.
+
+    ``site`` imports it during interpreter startup, before any module code —
+    the client's fail-closed guard included — so it discriminates the one
+    vector no in-module guard can see: the workspace riding the child's
+    PYTHONPATH.
+    """
+    ws = _hostile_workspace(root)
+    (ws / "sitecustomize.py").write_text(
+        "import sys\n"
+        f"sys.stderr.write('{SITECUSTOMIZE_SENTINEL}\\n')\n",
+        encoding="utf-8")
+    return ws
+
+
+def _capture_spawn(monkeypatch, tmp_path) -> dict:
+    """Monkeypatch the dispatcher's Popen to capture argv/cwd/env, with the throwaway
+    HOME the other spawn-boundary fixtures use (no real process is launched)."""
+    captured: dict = {}
+
+    class _Proc:
+        pid = 424242
+
+    def _capture_popen(cmd, **kw):
+        captured["cmd"] = list(cmd)
+        captured["cwd"] = kw.get("cwd")
+        captured["env"] = dict(kw.get("env") or {})
+        return _Proc()
+
+    monkeypatch.setattr(kanban_db_dispatch.subprocess, "Popen", _capture_popen)
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "fakehome" / ".hermes"))
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    return captured
 
 
 def _worker_env(ws: Path, home: Path) -> dict[str, str]:
@@ -236,3 +280,85 @@ def test_worker_fails_closed_through_symlinked_path_entries(tmp_path):
     assert GUARD_MARKER in proc.stderr, (
         f"symlinked workspace entry did not fail closed (rc={proc.returncode}):\n"
         f"{proc.stderr}")
+
+
+def test_dispatcher_scrubs_the_workspace_from_the_worker_pythonpath(tmp_path, monkeypatch):
+    """No PYTHONPATH entry the child inherits may resolve inside the workspace.
+
+    ``site`` imports ``sitecustomize`` from PYTHONPATH during interpreter
+    startup — before the client's fail-closed guard — and ``-P`` does not
+    ignore PYTHONPATH, so the env the dispatcher hands the child is the only
+    layer that can close that window. The workspace entry must be gone while
+    the checkout pin and unrelated inherited entries survive.
+    """
+    ws = _sitecustomize_workspace(tmp_path)
+    unrelated = tmp_path / "unrelated-pin"
+    unrelated.mkdir()
+    captured = _capture_spawn(monkeypatch, tmp_path)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(ws), str(unrelated)]))
+
+    kanban_db_dispatch._default_spawn(_task(), str(ws))
+
+    entries = captured["env"]["PYTHONPATH"].split(os.pathsep)
+    root = os.path.normcase(os.path.realpath(ws))
+    inside = [e for e in entries
+              if os.path.normcase(os.path.realpath(e)) == root
+              or os.path.normcase(os.path.realpath(e)).startswith(root + os.sep)]
+    assert not inside, f"workspace still importable from the worker env: {inside}"
+    assert str(REPO_ROOT) in [os.path.realpath(e) for e in entries], (
+        "the checkout pin must survive the scrub")
+    assert str(unrelated) in [os.path.realpath(e) for e in entries], (
+        "unrelated inherited entries must survive the scrub")
+
+
+def test_worker_boots_clean_over_a_hostile_sitecustomize_through_the_dispatcher_env(
+        tmp_path, monkeypatch):
+    """End-to-end through the REAL spawn boundary: the env the dispatcher actually
+    hands the child (post pin, post scrub) must boot the real client over a
+    workspace carrying ``sitecustomize.py`` without executing it — ``site`` runs
+    before the client's guard, so only the scrubbed env closes that window."""
+    ws = _sitecustomize_workspace(tmp_path)
+    captured = _capture_spawn(monkeypatch, tmp_path)
+    monkeypatch.setenv("PYTHONPATH", str(ws))
+
+    kanban_db_dispatch._default_spawn(_task(), str(ws))
+
+    # The capture patched subprocess.Popen module-globally (that is how the
+    # dispatcher reaches it); restore the real one before driving the child —
+    # captured argv/cwd/env are plain values, unaffected by the undo.
+    monkeypatch.undo()
+    # The dispatcher's own argv, cwd and env — but without the board vars that
+    # would drive the client at a live board (same discipline as _worker_env).
+    child_env = {k: v for k, v in captured["env"].items()
+                 if not k.startswith("HERMES_KANBAN")
+                 and k not in {"TERMINAL_CWD", "HERMES_SESSION_SOURCE", "HERMES_TENANT",
+                               "HERMES_PROFILE", "HERMES_BIN", "PYTEST_CURRENT_TEST"}}
+    child_env["HERMES_KANBAN_WORKSPACE"] = str(ws)
+    proc = subprocess.run(
+        captured["cmd"], cwd=str(captured["cwd"]), env=child_env,
+        capture_output=True, text=True, timeout=180, check=False)
+    _assert_never_imported_the_shadow(proc)
+    assert SITECUSTOMIZE_SENTINEL not in proc.stderr, (
+        f"the workspace sitecustomize executed during interpreter startup "
+        f"(rc={proc.returncode}):\n{proc.stderr}")
+    assert "Kanban owner refused" in proc.stderr, (
+        f"worker did not reach its clean refusal (rc={proc.returncode}):\n{proc.stderr}")
+    assert f"{EXIT_TRAILER}1" in proc.stderr, (
+        f"worker never wrote its exit trailer — boot did not complete:\n{proc.stderr}")
+
+
+def test_dispatcher_refuses_a_workspace_containing_the_checkout(tmp_path, monkeypatch):
+    """A workspace that contains the checkout cannot be isolated: the spawn cwd AND
+    the PYTHONPATH pin resolve inside it, and ``-m`` resolves the ``hermes_cli``
+    package from there before the client's guard can run. The dispatcher must
+    refuse the spawn with a named, host-level error (never charged to the card)
+    instead of launching a worker whose control plane imports task-controlled
+    bytes."""
+    _capture_spawn(monkeypatch, tmp_path)
+    degenerate = REPO_ROOT.parent  # contains the checkout _worker_spawn_cwd() returns
+
+    with pytest.raises(kanban_db_dispatch.WorkspaceContainsCheckout) as excinfo:
+        kanban_db_dispatch._default_spawn(_task(), str(degenerate))
+    message = str(excinfo.value)
+    assert str(degenerate) in message, message
+    assert str(REPO_ROOT) in message, message

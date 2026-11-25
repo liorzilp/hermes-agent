@@ -2162,9 +2162,11 @@ def _dispatch_lane_task(
     except Exception as exc:
         from tools.process_registry import RestartSafeScopeUnavailable
 
-        # The host refused the spawn (no restart-safe scope): nothing about the
-        # card ran, so it must not spend the card's retry budget (#114720).
-        infrastructure = isinstance(exc, RestartSafeScopeUnavailable)
+        # The host refused the spawn (no restart-safe scope, or a workspace that
+        # contains the checkout — both host-level shapes, never the card's
+        # property): nothing about the card ran, so it must not spend the
+        # card's retry budget (#114720).
+        infrastructure = isinstance(exc, (RestartSafeScopeUnavailable, WorkspaceContainsCheckout))
         if infrastructure:
             _kb._log.warning("kanban dispatcher: spawn of %s deferred, host cannot place the worker: %s", claimed.id, exc)
         if _record_task_failure(
@@ -2645,7 +2647,10 @@ def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> li
     ``PYTHONSAFEPATH`` the env var is silently ignored on the same older interpreters,
     so the flag — not an env var — is what is gated). Interpreters that do not know
     ``-P`` reject it outright, so they are skipped and rely on the safe spawn cwd plus
-    the client's fail-closed guard for the same invariant.
+    the client's fail-closed guard for the same invariant. ``-P`` does NOT ignore
+    PYTHONPATH — and ``site`` imports ``sitecustomize`` from it before any module
+    code — so the dispatcher also scrubs workspace-resolving entries from the env
+    it hands the child (``_scrub_workspace_from_pythonpath``).
     """
     import sys
     argv = [sys.executable]
@@ -2671,8 +2676,59 @@ def _worker_spawn_cwd() -> str:
     so launching from it adds no import surface; cron's external worker launches from
     its repo root for the same reason (#112729). ``TERMINAL_CWD`` — not the process
     cwd — keeps the worker's file tools and context loading anchored on the workspace.
+
+    The one degenerate shape — a workspace that equals or contains this checkout —
+    cannot satisfy "outside the workspace" at all (the PYTHONPATH pin points here
+    too, and ``-m`` resolves the ``hermes_cli`` package from here before the
+    client's guard can run); ``_default_spawn`` refuses it up front
+    (``WorkspaceContainsCheckout``) instead of spawning into it.
     """
     return str(Path(__file__).resolve().parent.parent)
+
+
+class WorkspaceContainsCheckout(RuntimeError):
+    """The task workspace contains the dispatcher checkout — isolation is impossible.
+
+    Host-level, never a property of the card's work: with the checkout inside
+    ``HERMES_KANBAN_WORKSPACE`` every spawn shape imports task-controlled bytes
+    (the PYTHONPATH pin, the spawn cwd, and ``-m``'s package resolution all
+    point into the workspace), so the dispatcher refuses the spawn instead.
+    Callers that keep per-job retry budgets must not charge it — the same
+    accounting as ``RestartSafeScopeUnavailable`` (#114720).
+    """
+
+
+def _path_resolves_inside(entry: str, normalized_root: str) -> bool:
+    """True when *entry* (resolved, case-normalized) is *normalized_root* or under it.
+
+    The same containment semantics the worker client's fail-closed guard uses,
+    duplicated here because that guard may import nothing before it runs.
+    """
+    resolved = os.path.normcase(os.path.realpath(entry))
+    return resolved == normalized_root or resolved.startswith(normalized_root + os.sep)
+
+
+def _scrub_workspace_from_pythonpath(env: dict, workspace: str) -> dict:
+    """Drop worker-env PYTHONPATH entries that resolve inside the task workspace.
+
+    ``site`` imports ``sitecustomize`` from PYTHONPATH during interpreter
+    startup — before any module code runs, the worker client's fail-closed
+    guard included — and ``-P`` does not ignore PYTHONPATH. The dispatcher
+    owns the environment it hands the worker: no entry of it may make the
+    workspace importable at startup, whatever put the entry there (inherited
+    from the dispatching process, a routed profile, an operator shell). The
+    checkout pin is added before this runs and is never inside the workspace —
+    a workspace that contains the checkout is refused earlier
+    (``WorkspaceContainsCheckout``).
+    """
+    raw = env.get("PYTHONPATH")
+    if not raw:
+        return env
+    normalized_root = os.path.normcase(os.path.realpath(workspace))
+    kept = [e for e in raw.split(os.pathsep)
+            if e and not _path_resolves_inside(e, normalized_root)]
+    env["PYTHONPATH"] = os.pathsep.join(kept)
+    return env
 
 
 def _open_worker_log(task: Task, board: Optional[str]):
@@ -2736,6 +2792,20 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     """
     if not task.assignee:
         raise ValueError(f"task {task.id} has no assignee")
+
+    # The isolation invariant is unsatisfiable when the workspace contains this
+    # checkout: the spawn cwd AND the PYTHONPATH pin below both resolve inside
+    # task-controlled bytes, and ``-m`` resolves the hermes_cli package from
+    # there before the client's guard can run. Refuse at dispatch — named,
+    # host-level, never charged to the card.
+    if _path_resolves_inside(_worker_spawn_cwd(),
+                             os.path.normcase(os.path.realpath(workspace))):
+        raise WorkspaceContainsCheckout(
+            f"task {task.id}: workspace {workspace} contains the dispatcher "
+            f"checkout ({_worker_spawn_cwd()}) — the worker's spawn cwd and "
+            f"PYTHONPATH pin would resolve inside task-controlled bytes; "
+            f"refusing the spawn (move the workspace, or run the dispatcher "
+            f"from a checkout outside it)")
 
     from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
 
@@ -2840,6 +2910,11 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # `No module named 'hermes_cli'` (#112729). Pinned last, after every other env decision.
     from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
     env = pin_hermes_tree_on_pythonpath(env, Path(project_root_str()))
+    # ``site`` imports sitecustomize from PYTHONPATH before any module code
+    # (the client's fail-closed guard included) and ``-P`` does not ignore
+    # PYTHONPATH — strip every workspace-resolving entry from the env we hand
+    # the child, whatever put it there.
+    env = _scrub_workspace_from_pythonpath(env, workspace)
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
     # that is performing the handoff.

@@ -6,8 +6,13 @@
 # ``import hermes_bootstrap`` (``AttributeError: module 'inspect' has no attribute
 # 'signature'``; log t_c4dbaf17). The dispatcher now spawns this process from outside
 # the workspace and passes ``-P`` where the interpreter knows it, but those are
-# per-version tools — this guard is the version-independent invariant, and it must run
-# before any other import so no shadowed module can load first. ``sys`` and ``os`` are
+# per-version tools — this guard is the version-independent half for every vector
+# that survives to module-exec time: it runs before any other import so no shadowed
+# module can load first. It cannot see interpreter startup itself: ``site`` imports
+# ``sitecustomize`` from PYTHONPATH before any module code (and ``-P`` does not
+# ignore PYTHONPATH), which is why the dispatcher also strips the workspace from
+# the PYTHONPATH it hands this process — the guard stays armed for anything that
+# slips past that (a relocated pin, a custom launcher). ``sys`` and ``os`` are
 # safe to import here: interpreter startup (``site``) loads them before ``-m`` prepends
 # the cwd, so a workspace file named ``os.py`` or ``sys.py`` cannot displace them by
 # the time this module executes.
